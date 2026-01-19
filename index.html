@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TouristMacas</title>
+
+  <!-- Bootstrap -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+  <!-- CSS -->
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<header class="main-header">
+  <nav class="navbar navbar-expand-lg navbar-dark container">
+    <a class="navbar-brand d-flex align-items-center gap-2" href="#">
+      <i class="bi bi-signpost-2-fill"></i>
+      TouristMacas
+    </a>
+
+    <button class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#menu">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+
+    <div class="collapse navbar-collapse" id="menu">
+      <ul class="navbar-nav ms-auto gap-2">
+
+        <!-- IDIOMA -->
+        <li class="nav-item">
+          <button class="btn btn-sm btn-light" id="btn-lang" title="Cambiar idioma">
+            <i class="bi bi-translate"></i>
+          </button>
+        </li>
+
+        <!-- MODO OSCURO -->
+        <li class="nav-item">
+          <button class="btn btn-sm btn-dark" id="btn-dark" title="Modo oscuro">
+            <i class="bi bi-moon-fill" id="icon-theme"></i>
+          </button>
+        </li>
+
+      </ul>
+    </div>
+  </nav>
+</header>
+
+<main class="container-fluid my-3">
+  <div class="row g-3">
+
+    <!-- PANEL -->
+    <aside class="col-lg-3">
+      <div class="search-panel">
+        <h5 id="txt-panel">
+          <i class="bi bi-search me-2"></i>
+          Panel de búsqueda
+        </h5>
+
+        <select id="category" class="form-select">
+          <option value="">🔎 Seleccione categoría</option>
+          <option value="transporte">🚍 Transporte</option>
+          <option value="alimentacion">🍽️ Alimentación</option>
+          <option value="hospedaje">🏨 Hospedaje</option>
+          <option value="instituciones">🏛️ Instituciones Públicas</option>
+          <option value="tiendas">🛍️ Tiendas</option>
+          <option value="supermercados">🛒 Supermercados</option>
+          <option value="vestimenta">👕 Vestimenta</option>
+          <option value="educacion">🎓 Educación</option>
+          <option value="parques">🌳 Parques</option>
+          <option value="iglesias">⛪ Iglesias</option>
+          <option value="belleza">💄 Belleza</option>
+          <option value="taxis">🚖 Taxis</option>
+        </select>
+      </div>
+    </aside>
+
+    <!-- MAPA -->
+    <section class="col-lg-9">
+      <div id="map"></div>
+    </section>
+
+  </div>
+</main>
+
+<!-- FOOTER -->
+<footer class="main-footer mt-4">
+  <div class="container">
+    <div class="row gy-3 align-items-center">
+
+      <div class="col-md-6 text-center text-md-start">
+        <h6 class="mb-1">TouristMacas</h6>
+        <p class="mb-0 small">Plataforma turística y de servicios de Macas.</p>
+        <p class="mb-0 small">© 2026 · Todos los derechos reservados</p>
+      </div>
+
+      <div class="col-md-6 text-center text-md-end">
+        <a href="https://instagram.com" class="footer-icon"><i class="bi bi-instagram"></i></a>
+        <a href="https://github.com" class="footer-icon"><i class="bi bi-github"></i></a>
+        <a href="https://linkedin.com" class="footer-icon"><i class="bi bi-linkedin"></i></a>
+      </div>
+
+    </div>
+  </div>
+</footer>
+
+<!-- JS -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="js/script.js"></script>
+
+</body>
+</html>
