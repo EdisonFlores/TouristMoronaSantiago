@@ -10,12 +10,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   }).addTo(map);
 
   const markersLayer = L.layerGroup().addTo(map);
+
   let routeLine = null;
   let userLocation = null;
-  let bellezaData = [];
-
+  let dataList = [];
   let markers = [];
   let activeMarker = null;
+  let routeRequestId = 0;
 
   /* ======================
      ICONO ACTIVO
@@ -37,17 +38,32 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       L.marker(userLocation)
         .addTo(map)
-        .bindPopup('📍 Tu ubicación')
-        .openPopup();
+        .bindPopup('📍 Tu ubicación');
     });
   }
 
   /* ======================
-     CSV BELLEZA
+     CSVs POR CATEGORÍA
   ====================== */
-  const BELLEZA_URL =
-    'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/belleza.csv';
+  const CSV_URLS = {
+    belleza: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/belleza.csv',
+    alimentacion: 'https://github.com/EdisonFlores/TouristMoronaSantiago/raw/main/csv/alimentacion.csv',
+    educacion: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/educacion.csv',
+    iglesias: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/iglesias.csv',
+    parques: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/parques.csv',
+    salud: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/salud.csv',
+    supermercados: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/supermercados.csv',
+    taxis: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/taxis.csv',
+    tiendas: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/tiendas.csv',
+    vestimenta: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/vestimenta.csv',
+    instituciones: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/%E2%80%8Cinstituciones.csv',
+    transporte_lineas: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/Transporte_lineas.csv',
+    transporte_paradas: 'https://raw.githubusercontent.com/EdisonFlores/TouristMoronaSantiago/main/csv/Transporte_paradas.csv'
+  };
 
+  /* ======================
+     PARSER CSV
+  ====================== */
   function parseCSV(text) {
     const lines = text.trim().split('\n');
     const headers = lines[0].split(';');
@@ -77,27 +93,32 @@ document.addEventListener('DOMContentLoaded', async () => {
   const panel = document.querySelector('.search-panel');
 
   const extraControls = document.createElement('div');
-  extraControls.id = 'extra-controls';
   panel.appendChild(extraControls);
 
   const infoBox = document.createElement('div');
-  infoBox.id = 'route-info';
   infoBox.className = 'mt-3 p-2 border rounded d-none';
   panel.appendChild(infoBox);
 
   /* ======================
-     CARGAR BELLEZA
+     CARGAR CATEGORÍA (GENÉRICO)
   ====================== */
-  async function loadBelleza() {
+  async function loadCategory(category) {
 
     markersLayer.clearLayers();
     markers = [];
-    if (routeLine) map.removeLayer(routeLine);
+    activeMarker = null;
+    dataList = [];
+
+    if (routeLine) {
+      map.removeLayer(routeLine);
+      routeLine = null;
+    }
+
     infoBox.classList.add('d-none');
 
     extraControls.innerHTML = `
-      <select id="place-select" class="form-select mt-2 mb-2">
-        <option value="">Seleccione establecimiento</option>
+      <select id="place-select" class="form-select mb-2">
+        <option value="">Seleccione lugar</option>
       </select>
 
       <button id="btn-nearest" class="btn btn-primary w-100 mb-2">
@@ -112,154 +133,140 @@ document.addEventListener('DOMContentLoaded', async () => {
     `;
 
     let currentMode = 'driving';
-
-    const csvText = await fetch(BELLEZA_URL).then(r => r.text());
-    bellezaData = parseCSV(csvText);
-
     const select = document.getElementById('place-select');
 
-    bellezaData.forEach((item, index) => {
+    // Transporte: mostrar líneas
+    if(category === 'transporte') {
+      const csvText = await fetch(CSV_URLS.transporte_lineas).then(r=>r.text());
+      dataList = parseCSV(csvText);
 
+      dataList.forEach((linea, i)=>{
+        const option = document.createElement('option');
+        option.value = i;
+        option.textContent = linea.nombre; // mostrar nombre de la línea
+        select.appendChild(option);
+      });
+
+      document.getElementById('btn-nearest').onclick = async () => {
+        if (!userLocation) return;
+
+        // ⚠️ Aquí se buscaría la parada más cercana cuando se disponga del CSV transporte_paradas
+        alert("Se detectará la parada más cercana cuando estén los puntos disponibles.");
+      };
+
+      select.onchange = e=>{
+        if(!e.target.value) return;
+        // Al seleccionar línea, se preparará la ruta con sus paradas (cuando estén disponibles)
+        const i = Number(e.target.value);
+        const linea = dataList[i];
+        markersLayer.clearLayers();
+        activeMarker = null;
+        infoBox.classList.add('d-none');
+        if(routeLine) map.removeLayer(routeLine);
+
+        // Por ahora solo se marca la línea seleccionada
+        alert(`Línea seleccionada: ${linea.nombre}\nPróximamente se mostrarán las paradas y la ruta.`);
+      };
+
+      return;
+    }
+
+    // CATEGORÍAS GENERALES (Belleza, Alimentación, etc.)
+    const csvText = await fetch(CSV_URLS[category]).then(r => r.text());
+    dataList = parseCSV(csvText);
+
+    dataList.forEach((item, i) => {
       const option = document.createElement('option');
-      option.value = index;
+      option.value = i;
       option.textContent = item.nombre;
       select.appendChild(option);
 
-      const basePopup = `
-        <b>${item.nombre}</b><br>
-        🕒 ${item.horario}<br>
-        📞 ${item.telefono}
-      `;
-
-      const marker = L.marker([item.lat, item.lng])
-        .addTo(markersLayer)
-        .bindPopup(basePopup);
-
-      marker.basePopupContent = basePopup;
+      const popup = `<b>${item.nombre}</b>`;
+      const marker = L.marker([item.lat, item.lng]).bindPopup(popup);
+      marker.basePopupContent = popup;
       markers.push(marker);
     });
 
-    /* ======================
-       BOTONES DE MODO
-    ====================== */
     extraControls.querySelectorAll('[data-mode]').forEach(btn => {
       btn.onclick = () => {
-        extraControls.querySelectorAll('[data-mode]')
-          .forEach(b => b.classList.remove('active'));
+        extraControls.querySelectorAll('[data-mode]').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         currentMode = btn.dataset.mode;
-
-        if (select.value !== '') {
-          select.dispatchEvent(new Event('change'));
-        }
+        if (select.value) select.dispatchEvent(new Event('change'));
       };
     });
 
-    /* ======================
-       MÁS CERCANO
-    ====================== */
     document.getElementById('btn-nearest').onclick = () => {
       if (!userLocation) return;
 
-      let nearestIndex = 0;
-      let min = Infinity;
-
-      bellezaData.forEach((item, i) => {
-        const d = Math.hypot(
-          userLocation[0] - item.lat,
-          userLocation[1] - item.lng
-        );
-        if (d < min) {
-          min = d;
-          nearestIndex = i;
-        }
+      let min = Infinity, index = 0;
+      dataList.forEach((p, i) => {
+        const d = Math.hypot(userLocation[0] - p.lat, userLocation[1] - p.lng);
+        if (d < min) { min = d; index = i; }
       });
 
-      select.value = nearestIndex;
+      select.value = index;
       select.dispatchEvent(new Event('change'));
     };
 
-    /* ======================
-       SELECCIÓN MANUAL
-    ====================== */
     select.onchange = e => {
       if (!e.target.value) return;
 
-      if (activeMarker) {
-        activeMarker.setIcon(new L.Icon.Default());
-        activeMarker.getElement()?.classList.remove('marker-bounce');
-      }
+      markersLayer.clearLayers();
+      if (routeLine) map.removeLayer(routeLine);
 
-      const index = e.target.value;
-      const item = bellezaData[index];
-      const marker = markers[index];
+      const i = Number(e.target.value);
+      const marker = markers[i];
 
-      marker.setIcon(highlightIcon);
-      marker.getElement()?.classList.add('marker-bounce');
+      marker.setIcon(highlightIcon).addTo(markersLayer);
       activeMarker = marker;
 
-      drawRouteOSRM(item.lat, item.lng, marker, currentMode);
-      map.setView([item.lat, item.lng], 16);
+      drawRouteOSRM(dataList[i].lat, dataList[i].lng, marker, currentMode);
+      map.setView([dataList[i].lat, dataList[i].lng], 16);
     };
   }
 
   /* ======================
-     RUTA REAL (OSRM)
+     RUTA OSRM
   ====================== */
   async function drawRouteOSRM(lat, lng, marker, mode) {
     if (!userLocation) return;
-    if (routeLine) map.removeLayer(routeLine);
 
-    const url =
-      `https://router.project-osrm.org/route/v1/${mode}/` +
-      `${userLocation[1]},${userLocation[0]};${lng},${lat}` +
-      `?overview=full&geometries=geojson`;
+    const id = ++routeRequestId;
+    infoBox.classList.add('d-none');
 
-    const res = await fetch(url);
+    const res = await fetch(
+      `https://router.project-osrm.org/route/v1/driving/${userLocation[1]},${userLocation[0]};${lng},${lat}?overview=full&geometries=geojson`
+    );
     const data = await res.json();
-    if (!data.routes || !data.routes.length) return;
+    if (id !== routeRequestId || !data.routes?.length) return;
 
     const route = data.routes[0];
 
-    routeLine = L.geoJSON(route.geometry, {
-      style: {
-        color: mode === 'foot' ? '#28a745' :
-               mode === 'bike' ? '#ffc107' :
-               '#0d6efd',
-        weight: 5
-      }
-    }).addTo(map);
+    routeLine = L.geoJSON(route.geometry, { weight: 5 }).addTo(map);
 
     const km = (route.distance / 1000).toFixed(2);
-    const min = Math.round(route.duration / 60);
+    let sec = route.duration;
+    if (mode === 'bike') sec *= 1.6;
+    if (mode === 'foot') sec *= 3.6;
 
-    marker.setPopupContent(marker.basePopupContent).openPopup();
-
+    sec = Math.round(sec);
     infoBox.innerHTML = `
-      <strong>${marker.basePopupContent.match(/<b>(.*?)<\/b>/)[1]}</strong><br>
-      📏 Distancia: ${km} km<br>
-      ⏱️ Tiempo estimado: ${min} min
+      <strong>${marker.basePopupContent.replace(/<[^>]+>/g, '')}</strong><br>
+      📏 ${km} km<br>
+      ⏱️ ${Math.floor(sec / 60)} min ${sec % 60}s
     `;
     infoBox.classList.remove('d-none');
-
-    if (window.innerWidth < 768) {
-      document.getElementById('map')
-        .scrollIntoView({ behavior: 'smooth' });
-    }
   }
 
   /* ======================
      CATEGORÍAS
   ====================== */
   document.getElementById('category').addEventListener('change', e => {
-    markersLayer.clearLayers();
-    extraControls.innerHTML = '';
-    infoBox.classList.add('d-none');
-    if (routeLine) map.removeLayer(routeLine);
-    activeMarker = null;
-
-    if (e.target.value === 'belleza') {
-      loadBelleza();
+    if (e.target.value === 'transporte') {
+      loadCategory('transporte');
+    } else if (CSV_URLS[e.target.value]) {
+      loadCategory(e.target.value);
     }
   });
 
