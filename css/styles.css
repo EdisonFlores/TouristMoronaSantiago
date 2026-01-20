@@ -69,3 +69,13 @@ body {
   color: var(--primary);
   transform: scale(1.2);
 }
+/* contenedor interno que sí se puede animar */
+.leaflet-marker-icon .bounce-inner {
+  display: block;
+  animation: bounce 0.6s infinite alternate ease-in-out;
+}
+
+@keyframes bounce {
+  from { transform: translateY(0); }
+  to   { transform: translateY(-10px); }
+}

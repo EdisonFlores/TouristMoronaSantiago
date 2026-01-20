@@ -1,56 +1,49 @@
 document.addEventListener('DOMContentLoaded', () => {
 
-  /* MAPA */
-  const map = L.map('map').setView([-2.3087, -77.9995], 14);
-
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap'
-  }).addTo(map);
-
-  /* UBICACIÓN */
-  if (navigator.geolocation) {
-    navigator.geolocation.getCurrentPosition(pos => {
-      L.marker([pos.coords.latitude, pos.coords.longitude])
-        .addTo(map)
-        .bindPopup('Tu ubicación')
-        .openPopup();
-    });
-  }
-
-  /* MODO OSCURO */
+  /* ======================
+     MODO OSCURO
+  ====================== */
   const btnDark = document.getElementById('btn-dark');
   const iconTheme = document.getElementById('icon-theme');
 
-  btnDark.onclick = () => {
-    const html = document.documentElement;
-    const dark = html.dataset.theme === 'dark';
+  if (btnDark) {
+    btnDark.addEventListener('click', () => {
+      const html = document.documentElement;
+      const isDark = html.dataset.theme === 'dark';
 
-    html.dataset.theme = dark ? 'light' : 'dark';
-    iconTheme.className = dark ? 'bi bi-moon-fill' : 'bi bi-sun-fill';
-  };
+      html.dataset.theme = isDark ? 'light' : 'dark';
+      iconTheme.className = isDark
+        ? 'bi bi-moon-fill'
+        : 'bi bi-sun-fill';
+    });
+  }
 
-  /* TRADUCCIÓN */
+  /* ======================
+     IDIOMA
+  ====================== */
   const lang = {
     es: {
-      panel: 'Panel de búsqueda',
-      select: '🔎 Seleccione categoría'
+      panel: 'Panel de búsqueda'
     },
     en: {
-      panel: 'Search panel',
-      select: '🔎 Select category'
+      panel: 'Search panel'
     }
   };
 
   let currentLang = 'es';
 
-  document.getElementById('btn-lang').onclick = () => {
-    currentLang = currentLang === 'es' ? 'en' : 'es';
+  const btnLang = document.getElementById('btn-lang');
+  const txtPanel = document.getElementById('txt-panel');
 
-    document.getElementById('txt-panel').innerHTML =
-      `<i class="bi bi-search me-2"></i>${lang[currentLang].panel}`;
+  if (btnLang) {
+    btnLang.addEventListener('click', () => {
+      currentLang = currentLang === 'es' ? 'en' : 'es';
 
-    document.querySelector('#category option[value=""]').innerText =
-      lang[currentLang].select;
-  };
+      if (txtPanel) {
+        txtPanel.innerHTML =
+          `<i class="bi bi-search me-2"></i>${lang[currentLang].panel}`;
+      }
+    });
+  }
 
 });
