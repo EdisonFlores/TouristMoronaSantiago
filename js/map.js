@@ -9,9 +9,19 @@ export const markersLayer = L.layerGroup().addTo(map);
 let routeLine = null;
 let routeRequestId = 0;
 
+// ================== LIMPIAR RUTA ==================
+export function clearRoute() {
+  routeRequestId++; // invalida cualquier request en curso
+
+  if (routeLine) {
+    map.removeLayer(routeLine);
+    routeLine = null;
+  }
+}
+
 // ================== MARKERS ==================
 export function renderMarkers(dataList, onSelect) {
-  markersLayer.clearLayers();
+  clearMarkers();
 
   dataList.forEach(place => {
     const marker = L.marker([place.lat, place.lng])
@@ -32,6 +42,7 @@ export async function drawRoute(userLocation, place, mode, infoBox) {
 
   // 🚫 BUS AÚN NO IMPLEMENTADO
   if (mode === "bus") {
+    clearRoute();
     infoBox.innerHTML = `
       🚌 Bus<br>
       ⚠️ El modo de transporte en bus aún no está disponible
@@ -39,12 +50,7 @@ export async function drawRoute(userLocation, place, mode, infoBox) {
     return;
   }
 
-  // Limpiar ruta anterior
-  if (routeLine) {
-    map.removeLayer(routeLine);
-    routeLine = null;
-  }
-
+  clearRoute();
   const currentRequestId = ++routeRequestId;
 
   const profileMap = {
@@ -64,7 +70,11 @@ export async function drawRoute(userLocation, place, mode, infoBox) {
     );
 
     const json = await res.json();
-    if (currentRequestId !== routeRequestId || !json.routes?.length) return;
+    if (
+      currentRequestId !== routeRequestId ||
+      !json.routes ||
+      !json.routes.length
+    ) return;
 
     const route = json.routes[0];
 
@@ -88,7 +98,7 @@ export async function drawRoute(userLocation, place, mode, infoBox) {
 
 // ================== SOLO UN MARKER ==================
 export function showSingleMarker(place) {
-  markersLayer.clearLayers();
+  clearMarkers();
 
   L.marker([place.lat, place.lng])
     .addTo(markersLayer)
@@ -99,7 +109,9 @@ export function showSingleMarker(place) {
     `)
     .openPopup();
 }
-// ================== LIMPIAR TODOS LOS MARKERS ==================
+
+// ================== LIMPIAR MARKERS Y RUTA ==================
 export function clearMarkers() {
   markersLayer.clearLayers();
+  clearRoute();
 }

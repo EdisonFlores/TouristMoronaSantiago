@@ -1,7 +1,11 @@
 import { provinciasEC } from "./dataGeo.js";
 import { db } from "./firebase.js";
-import { collection, getDocs, query, where } from
-  "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import {
+  collection,
+  getDocs,
+  query,
+  where
+} from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
 import {
   map,
@@ -28,6 +32,7 @@ let currentMode = "walking";
 // ================= SELECTS =================
 const provinciaSelect = document.getElementById("provincia");
 const cantonSelect = document.getElementById("canton");
+const parroquiaSelect = document.getElementById("parroquia");
 const categorySelect = document.getElementById("category");
 const infoBox = document.getElementById("info-box");
 const extraControls = document.getElementById("extra-controls");
@@ -49,12 +54,30 @@ function resetCanton() {
   cantonSelect.disabled = true;
 }
 
+function resetParroquia() {
+  parroquiaSelect.value = "";
+  parroquiaSelect.innerHTML =
+    `<option value="">🏘️ Seleccione parroquia</option>`;
+  parroquiaSelect.classList.add("d-none");
+  parroquiaSelect.disabled = true;
+}
+
+function clearRouteInfo() {
+  infoBox.innerHTML = "";
+  activePlace = null;
+}
+
+function resetMap() {
+  clearMarkers();
+  clearRouteInfo();
+}
+
 function resetAllUI() {
   resetCanton();
+  resetParroquia();
   resetCategory();
   hidePlacesUI();
-  clearRouteInfo();
-  clearMarkers();
+  resetMap();
 }
 
 // ================= PROVINCIAS =================
@@ -83,9 +106,17 @@ provinciaSelect.onchange = async () => {
     return;
   }
 
-  provinciasEC[provinciaSelect.value].forEach(c => {
-    cantonSelect.innerHTML += `<option value="${c}">${c}</option>`;
-  });
+  const provinciaData = provinciasEC[provinciaSelect.value];
+
+  if (Array.isArray(provinciaData)) {
+    provinciaData.forEach(c =>
+      cantonSelect.innerHTML += `<option value="${c}">${c}</option>`
+    );
+  } else {
+    Object.keys(provinciaData).forEach(c =>
+      cantonSelect.innerHTML += `<option value="${c}">${c}</option>`
+    );
+  }
 
   cantonSelect.disabled = false;
 };
@@ -93,9 +124,9 @@ provinciaSelect.onchange = async () => {
 // ================= CANTÓN CHANGE =================
 cantonSelect.onchange = async () => {
   resetCategory();
+  resetParroquia();
   hidePlacesUI();
-  clearMarkers();
-  clearRouteInfo();
+  resetMap();
   infoBox.innerHTML = "";
 
   if (!cantonSelect.value) return;
@@ -115,15 +146,60 @@ cantonSelect.onchange = async () => {
     return;
   }
 
+  const provinciaData = provinciasEC[provinciaSelect.value];
+
+  // 🌿 SOLO PROVINCIAS AMAZÓNICAS (objeto con parroquias)
+  if (!Array.isArray(provinciaData)) {
+    const parroquias = provinciaData[cantonSelect.value];
+
+    if (parroquias && parroquias.length) {
+      parroquias.forEach(p =>
+        parroquiaSelect.innerHTML +=
+          `<option value="${p}">${p}</option>`
+      );
+
+      parroquiaSelect.classList.remove("d-none");
+      parroquiaSelect.disabled = false;
+      return;
+    }
+  }
+
+  categorySelect.classList.remove("d-none");
+};
+
+// ================= PARROQUIA CHANGE =================
+parroquiaSelect.onchange = async () => {
+  resetCategory();
+  hidePlacesUI();
+  resetMap();
+  infoBox.innerHTML = "";
+
+  if (!parroquiaSelect.value) return;
+
+  const q = query(
+    collection(db, "lugar"),
+    where("activo", "==", true),
+    where("provincia", "==", provinciaSelect.value),
+    where("ciudad", "==", cantonSelect.value),
+    where("parroquia", "==", parroquiaSelect.value)
+  );
+
+  const snap = await getDocs(q);
+
+  if (snap.empty) {
+    infoBox.innerHTML =
+      "⚠️ No hay datos disponibles de momento para esta parroquia.";
+    return;
+  }
+
   categorySelect.classList.remove("d-none");
 };
 
 // ================= CATEGORÍA CHANGE =================
 categorySelect.onchange = async () => {
   dataList = [];
-  clearMarkers();
+  resetMap();
   hidePlacesUI();
-  clearRouteInfo();
   infoBox.innerHTML = "";
 
   if (!categorySelect.value) return;
@@ -132,13 +208,24 @@ categorySelect.onchange = async () => {
     categorySelect.value.charAt(0).toUpperCase() +
     categorySelect.value.slice(1);
 
-  const q = query(
+  let q = query(
     collection(db, "lugar"),
     where("activo", "==", true),
     where("provincia", "==", provinciaSelect.value),
     where("ciudad", "==", cantonSelect.value),
     where("subcategoria", "==", subcategoria)
   );
+
+  if (!parroquiaSelect.classList.contains("d-none") && parroquiaSelect.value) {
+    q = query(
+      collection(db, "lugar"),
+      where("activo", "==", true),
+      where("provincia", "==", provinciaSelect.value),
+      where("ciudad", "==", cantonSelect.value),
+      where("parroquia", "==", parroquiaSelect.value),
+      where("subcategoria", "==", subcategoria)
+    );
+  }
 
   const snap = await getDocs(q);
 
@@ -196,9 +283,4 @@ function findNearest() {
   });
 
   if (nearest) selectPlace(nearest);
-}
-
-function clearRouteInfo() {
-  infoBox.innerHTML = "";
-  activePlace = null;
 }

@@ -29,18 +29,19 @@ export const provinciasEC = {
 
   // 🌿 AMAZONÍA (con parroquias)
   "Morona Santiago": {
-    "Morona": ["Macas","Alshi","Chiguaza","General Proaño","Huamboya","Río Blanco","Sevilla Don Bosco"],
-    "Gualaquiza": ["Gualaquiza","Bomboiza","El Rosario","Nueva Tarqui","San Miguel de Cuyes"],
-    "Limón Indanza": ["General Leonidas Plaza Gutiérrez","Indanza","Pucayacu","Santa Susana de Chiviaza"],
+    "Morona": ["Macas","Alshi","Cuchaentza","General Proaño","Zuñac","San Isidro","Sinaí"],
+    "Sevilla Don Bosco": ["Sevilla Don Bosco"],
+    "Gualaquiza": ["Gualaquiza","Bomboiza","El Rosario","Nueva Tarqui","San Miguel de Cuyes","Bermejos","Amazonas","El Ideal"],
+    "Limón Indanza": ["General Leonidas Plaza Gutiérrez","Indanza","San Miguel de Conchay","Santa Susana de Chiviaza","San Antonio","El Rosario","Yunganza"],
     "Logroño": ["Logroño","Yaupi","Shimpis"],
-    "Palora": ["Palora","Arapicos","Cumandá","Sangay"],
+    "Palora": ["Palora","Arapicos","Cumandá","Sangay","16 de Agosto"],
     "Pablo Sexto": ["Pablo Sexto"],
     "San Juan Bosco": ["San Juan Bosco","Pan de Azúcar","San Carlos de Limón"],
     "Santiago": ["Santiago","San Luis de El Acho","Tayuza"],
-    "Sucúa": ["Sucúa","Asunción","Huambi"],
+    "Sucúa": ["Sucúa","Asunción","Huambi","Santa Marianita de Jesús"],
     "Taisha": ["Taisha","Huasaga","Macuma","Pumpuentsa","Tuutinentza"],
     "Tiwintza": ["Santiago","San José de Morona"],
-    "Huamboya": ["Huamboya"]
+    "Huamboya": ["Huamboya","Chiguaza"]
   },
 
   "Napo": {
