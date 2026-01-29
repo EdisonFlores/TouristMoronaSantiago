@@ -1,4 +1,6 @@
 // map/map.js
+import { formatDurationFromSeconds } from "../app/helpers.js";
+
 export const map = L.map("map").setView([-2.309948, -78.124482], 13);
 
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -66,11 +68,14 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
     walking: "foot",
     driving: "car",
     cycling: "bike",
+    bicycle: "bike",
+    motorcycle: "car",
     bus: "car" // temporal, se puede reemplazar si hay rutas de bus
   }[mode] || "foot";
 
-  const url = `https://router.project-osrm.org/route/v1/${profile}/` +
-              `${userLoc[1]},${userLoc[0]};${longitude},${latitude}?overview=full&geometries=geojson`;
+  const url =
+    `https://router.project-osrm.org/route/v1/${profile}/` +
+    `${userLoc[1]},${userLoc[0]};${longitude},${latitude}?overview=full&geometries=geojson`;
 
   const res = await fetch(url);
   const data = await res.json();
@@ -87,15 +92,34 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
 
   map.fitBounds(routeLine.getBounds());
 
-  // calcular tiempo y distancia reales
-  const tiempoMin = Math.round(route.duration / 60);
-  const distanciaKm = (route.distance / 1000).toFixed(2);
+  // calcular tiempo y distancia
+  const distanciaKm = route.distance / 1000;
+
+  const velocidadPorModo = {
+    walking: 5,
+    cycling: 15,
+    bicycle: 15,
+    motorcycle: 35,
+    driving: 30
+  };
+
+  // si bus o no hay velocidad definida, usamos OSRM (segundos)
+  const usaTiempoOsrm = mode === "bus" || !velocidadPorModo[mode];
+
+  const tiempoSeg = usaTiempoOsrm
+    ? Math.round(route.duration)
+    : Math.round((distanciaKm / velocidadPorModo[mode]) * 3600);
+
+  // ✅ AQUÍ EL CAMBIO: ahora muestra horas/min si pasa de 59 min
+  const tiempoTexto = formatDurationFromSeconds(tiempoSeg);
+
+  const distanciaKmTexto = distanciaKm.toFixed(2);
 
   if (infoBox) {
     infoBox.innerHTML = `
       <b>Ruta (${mode})</b><br>
-      ⏱ ${tiempoMin} min<br>
-      📏 ${distanciaKm} km
+      ⏱ ${tiempoTexto}<br>
+      📏 ${distanciaKmTexto} km
     `;
   }
 }

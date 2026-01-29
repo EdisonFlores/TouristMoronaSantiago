@@ -6,7 +6,7 @@ import { findNearest } from "./app/actions.js";
 import { dataList, setUserLocation, getUserLocation } from "./app/state.js";
 
 import { map, renderMarkers, clearMarkers, clearRoute, drawRoute } from "./map/map.js";
-import { cargarLineasTransporte } from "./transport/transport_controller.js";
+import { cargarLineasTransporte, clearTransportLayers } from "./transport/transport_controller.js";
 
 import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
@@ -24,11 +24,12 @@ const extra = document.getElementById("extra-controls");
 /* ================= HELPERS ================= */
 
 /**
- * Reinicia el mapa: quita rutas y marcadores
+ * Reinicia el mapa: quita rutas y marcadores (incluye transporte)
  */
 function resetMap() {
   clearMarkers();
   clearRoute();
+  clearTransportLayers(); // ✅ limpia ruta del bus + paradas + dashed + timer
   activePlace = null;
 }
 
@@ -37,7 +38,7 @@ function resetMap() {
  * @param {Object} place Lugar a mostrar
  */
 function showSinglePlace(place) {
-  clearMarkers();  // Solo se muestra este marcador
+  clearMarkers(); // Solo se muestra este marcador
   renderMarkers([place], () => {
     drawRoute(getUserLocation(), place, activeMode, document.getElementById("route-info"));
   });
@@ -57,7 +58,6 @@ navigator.geolocation.getCurrentPosition(pos => {
   const loc = [pos.coords.latitude, pos.coords.longitude];
   setUserLocation(loc);
 
-  // Marcador de la ubicación del usuario
   L.marker(loc)
     .addTo(map)
     .bindPopup("📍 Tu ubicación");
@@ -73,10 +73,17 @@ navigator.geolocation.getCurrentPosition(pos => {
 /* ================= EVENTO PROVINCIA ================= */
 provincia.onchange = async () => {
   resetMap();
+
   canton.disabled = false;
   canton.innerHTML = `<option value="">🏙️ Seleccione cantón</option>`;
   parroquia.classList.add("d-none");
+  parroquia.disabled = true;
+  parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
+
+  // ✅ reset y ocultar categoría
+  category.value = "";
   category.classList.add("d-none");
+
   extra.innerHTML = "";
 
   const cantones = await getCantonesConDatos(provincia.value);
@@ -86,10 +93,15 @@ provincia.onchange = async () => {
 /* ================= EVENTO CANTÓN ================= */
 canton.onchange = async () => {
   resetMap();
+
   parroquia.disabled = false;
   parroquia.classList.remove("d-none");
   parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
+
+  // ✅ reset y ocultar categoría
+  category.value = "";
   category.classList.add("d-none");
+
   extra.innerHTML = "";
 
   const parroquias = await getParroquiasConDatos(provincia.value, canton.value);
@@ -99,7 +111,13 @@ canton.onchange = async () => {
 /* ================= EVENTO PARROQUIA ================= */
 parroquia.onchange = () => {
   resetMap();
-  category.classList.remove("d-none");
+
+  // ✅ aquí pediste: ocultar y resetear categoría hasta que se vuelva a escoger
+  category.value = "";
+  category.classList.remove("d-none"); // mostrar para que el usuario escoja categoría
+  // Si tú lo quieres OCULTO hasta otra acción, cambia a:
+  // category.classList.add("d-none");
+
   extra.innerHTML = "";
 };
 
@@ -108,6 +126,8 @@ category.onchange = async () => {
   resetMap();
   extra.innerHTML = "";
   dataList.length = 0;
+
+  if (!category.value) return;
 
   /* ===== LÍNEAS DE TRANSPORTE ===== */
   if (category.value === "transporte_lineas") {
@@ -136,7 +156,9 @@ category.onchange = async () => {
       l.ciudad === canton.value &&
       l.parroquia === parroquia.value &&
       l.subcategoria?.toLowerCase() === category.value.toLowerCase()
-    ) dataList.push(l);
+    ) {
+      dataList.push(l);
+    }
   });
 
   if (!dataList.length) {
@@ -144,7 +166,7 @@ category.onchange = async () => {
     return;
   }
 
-  /* ===== CONTROLES DE SELECCIÓN ===== */
+  /* ===== CONTROLES ===== */
   extra.innerHTML = `
     <select id="lugares" class="form-select mb-2">
       <option value="">📍 Seleccione lugar</option>
@@ -156,7 +178,7 @@ category.onchange = async () => {
 
     <div class="btn-group w-100 mb-2">
       <button class="btn btn-outline-primary" data-mode="walking">🚶</button>
-      <button class="btn btn-outline-primary" data-mode="cycling">🚴</button>
+      <button class="btn btn-outline-primary" data-mode="bicycle">🚴</button>
       <button class="btn btn-outline-primary" data-mode="motorcycle">🏍️</button>
       <button class="btn btn-outline-primary" data-mode="driving">🚗</button>
       <button class="btn btn-outline-primary" data-mode="bus">🚌</button>
@@ -167,17 +189,16 @@ category.onchange = async () => {
 
   const sel = document.getElementById("lugares");
 
-  // Rellenar select de lugares
-  dataList.forEach((l, i) => sel.innerHTML += `<option value="${i}">${l.nombre}</option>`);
+  dataList.forEach((l, i) => {
+    sel.innerHTML += `<option value="${i}">${l.nombre}</option>`;
+  });
 
-  // Marcadores clicables
   renderMarkers(dataList, place => {
     activePlace = place;
     showSinglePlace(place);
     buildRoute();
   });
 
-  // Selección de lugar desde dropdown
   sel.onchange = () => {
     activePlace = dataList[sel.value];
     if (!activePlace) return;
@@ -185,7 +206,6 @@ category.onchange = async () => {
     buildRoute();
   };
 
-  // Lugar más cercano
   document.getElementById("near").onclick = () => {
     activePlace = findNearest(dataList);
     if (!activePlace) return;
@@ -193,7 +213,6 @@ category.onchange = async () => {
     buildRoute();
   };
 
-  // Botones de modos de transporte
   document.querySelectorAll("[data-mode]").forEach(btn => {
     btn.onclick = () => {
       activeMode = btn.dataset.mode;

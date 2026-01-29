@@ -44,3 +44,17 @@ export function minutesToTime(m) {
   const min = m%60;
   return `${h.toString().padStart(2,"0")}:${min.toString().padStart(2,"0")}`;
 }
+export function formatDurationFromSeconds(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+
+  if (s < 60) return `${s} s`;
+
+  const totalMinutes = Math.round(s / 60);
+
+  if (totalMinutes < 60) return `${totalMinutes} min`;
+
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+
+  return `${h} h ${m} min`;
+}
