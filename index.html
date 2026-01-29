@@ -5,9 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TouristMacas</title>
 
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <!-- Bootstrap -->
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+  >
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
+    rel="stylesheet"
+  >
+
+  <!-- Leaflet -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+
+  <!-- Leaflet Routing -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css"
+  />
+
+  <!-- Estilos -->
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -24,6 +44,7 @@
 <main class="container-fluid my-3">
   <div class="row g-3">
 
+    <!-- PANEL -->
     <aside class="col-lg-3">
       <div class="search-panel">
 
@@ -36,11 +57,13 @@
         <select id="canton" class="form-select mb-2" disabled>
           <option value="">🏙️ Seleccione cantón</option>
         </select>
+
         <select id="parroquia" class="form-select mb-2 d-none" disabled>
           <option value="">🏘️ Seleccione parroquia</option>
         </select>
 
         <select id="category" class="form-select mb-2 d-none">
+          <option value="">🔎 Seleccione categoría</option>
           <option value="">🔎 Seleccione categoría</option>
 
           <optgroup label="🚍 Transporte">
@@ -114,6 +137,7 @@
       </div>
     </aside>
 
+    <!-- MAPA -->
     <section class="col-lg-9">
       <div id="map"></div>
     </section>
@@ -128,9 +152,11 @@
   </div>
 </footer>
 
+<!-- JS -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script type="module" src="js/app.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
+<script type="module" src="js/script.js"></script>
 
 </body>
 </html>
