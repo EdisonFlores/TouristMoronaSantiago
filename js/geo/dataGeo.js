@@ -29,7 +29,7 @@ export const provinciasEC = {
 
   // 🌿 AMAZONÍA (con parroquias)
   "Morona Santiago": {
-    "Morona": ["Macas","Alshi","Cuchaentza","General Proaño","Zuñac","San Isidro","Sinaí"],
+    "Morona": ["Macas","Alshi","Cuchaentza","General Proaño","Zuñac","San Isidro","Sinaí","Rio Blanco"],
     "Sevilla Don Bosco": ["Sevilla Don Bosco"],
     "Gualaquiza": ["Gualaquiza","Bomboiza","El Rosario","Nueva Tarqui","San Miguel de Cuyes","Bermejos","Amazonas","El Ideal"],
     "Limón Indanza": ["General Leonidas Plaza Gutiérrez","Indanza","San Miguel de Conchay","Santa Susana de Chiviaza","San Antonio","El Rosario","Yunganza"],

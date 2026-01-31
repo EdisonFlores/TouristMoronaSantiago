@@ -25,7 +25,14 @@ export function clearRouteInfo(infoBox) {
   infoBox.innerHTML = "";
 }
 
-export function resetAllUI({ cantonSelect, parroquiaSelect, categorySelect, extraControls, infoBox, clearMarkers }) {
+export function resetAllUI({
+  cantonSelect,
+  parroquiaSelect,
+  categorySelect,
+  extraControls,
+  infoBox,
+  clearMarkers
+}) {
   resetCanton(cantonSelect);
   resetParroquia(parroquiaSelect);
   resetCategory(categorySelect);
@@ -36,25 +43,73 @@ export function resetAllUI({ cantonSelect, parroquiaSelect, categorySelect, extr
 
 export function timeToMinutes(t) {
   const [h, m] = t.split(":").map(Number);
-  return h*60+m;
+  return h * 60 + m;
 }
 
 export function minutesToTime(m) {
-  const h = Math.floor(m/60)%24;
-  const min = m%60;
-  return `${h.toString().padStart(2,"0")}:${min.toString().padStart(2,"0")}`;
+  const h = Math.floor(m / 60) % 24;
+  const min = m % 60;
+  return `${h.toString().padStart(2, "0")}:${min.toString().padStart(2, "0")}`;
 }
-export function formatDurationFromSeconds(totalSeconds) {
-  const s = Math.max(0, Math.round(totalSeconds));
+
+/**
+ * Convierte segundos a texto realista:
+ *  - 45s => "45 s"
+ *  - 90s => "2 min"
+ *  - 3600s => "1 h"
+ *  - 3960s => "1 h 6 min"
+ */
+export function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "N/D";
+
+  const s = Math.round(seconds);
+  if (s < 60) return `${s} s`;
+
+  const totalMin = Math.round(s / 60);
+  if (totalMin < 60) return `${totalMin} min`;
+
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+
+  if (m === 0) return `${h} h`;
+  return `${h} h ${m} min`;
+}
+
+/**
+ * Parsea "06:00 a 08:00" -> { startMin, endMin }
+ */
+export function parseHorarioBloque(str) {
+  if (!str || typeof str !== "string") return null;
+  const clean = str.replace(/\s+/g, " ").trim();
+  const parts = clean.split("a").map(s => s.trim());
+  if (parts.length !== 2) return null;
+  const start = parts[0];
+  const end = parts[1];
+  if (!start.includes(":") || !end.includes(":")) return null;
+  return { startMin: timeToMinutes(start), endMin: timeToMinutes(end) };
+}
+
+/**
+ * true si es sábado o domingo
+ */
+export function isWeekend(date = new Date()) {
+  const d = date.getDay(); // 0 dom, 6 sáb
+  return d === 0 || d === 6;
+}
+// ================= FORMATO DE TIEMPO =================
+// Convierte segundos a texto realista (horas/minutos)
+
+export function formatDurationFromSeconds(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
 
   if (s < 60) return `${s} s`;
 
-  const totalMinutes = Math.round(s / 60);
+  const totalMin = Math.round(s / 60);
 
-  if (totalMinutes < 60) return `${totalMinutes} min`;
+  if (totalMin < 60) return `${totalMin} min`;
 
-  const h = Math.floor(totalMinutes / 60);
-  const m = totalMinutes % 60;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
 
-  return `${h} h ${m} min`;
+  return m === 0 ? `${h} h` : `${h} h ${m} min`;
 }

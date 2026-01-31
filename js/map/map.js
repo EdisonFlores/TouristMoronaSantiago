@@ -60,7 +60,9 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
   // marcador del lugar seleccionado
   markerSelected = L.marker([latitude, longitude])
     .addTo(map)
-    .bindPopup(`<b>${place.nombre}</b><br>📞 ${place.telefono || "-"}<br>⏰ ${place.horario || "-"}`)
+    .bindPopup(
+      `<b>${place.nombre}</b><br>📞 ${place.telefono || "-"}<br>⏰ ${place.horario || "-"}`
+    )
     .openPopup();
 
   // perfil para OSRM
@@ -110,7 +112,7 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
     ? Math.round(route.duration)
     : Math.round((distanciaKm / velocidadPorModo[mode]) * 3600);
 
-  // ✅ AQUÍ EL CAMBIO: ahora muestra horas/min si pasa de 59 min
+  // ✅ ahora muestra horas/min si pasa de 59 min
   const tiempoTexto = formatDurationFromSeconds(tiempoSeg);
 
   const distanciaKmTexto = distanciaKm.toFixed(2);
