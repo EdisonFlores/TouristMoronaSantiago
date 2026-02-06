@@ -1,9 +1,6 @@
 // js/transport/core/transport_state.js
 import { map } from "../../map/map.js";
 
-/* =====================================================
-   LAYERS / ESTADO CENTRALIZADO
-===================================================== */
 let layerLineas = null;
 let layerParadas = null;
 let layerAcceso = null;
@@ -16,9 +13,7 @@ let currentStopOffsets = new Map();
 let nearestStopMarker = null;
 let nearestStopMarkerOriginalStyle = null;
 
-/* =====================================================
-   SETTERS / GETTERS
-===================================================== */
+/* ================= SETTERS / GETTERS ================= */
 export function setRouteLayer(layer) {
   if (layerLineas) map.removeLayer(layerLineas);
   layerLineas = layer || null;
@@ -71,9 +66,7 @@ export function getCurrentStopOffsets() {
   return currentStopOffsets;
 }
 
-/* =====================================================
-   RESALTADO (parada más cercana)
-===================================================== */
+/* ================= RESALTADO ================= */
 export function resetNearestHighlight() {
   if (nearestStopMarker && nearestStopMarkerOriginalStyle) {
     nearestStopMarker.setStyle(nearestStopMarkerOriginalStyle);
@@ -104,9 +97,7 @@ export function setNearestHighlight(marker) {
   });
 }
 
-/* =====================================================
-   LIMPIEZA TOTAL
-===================================================== */
+/* ================= LIMPIEZA TOTAL ================= */
 export function clearTransportState() {
   if (layerLineas) map.removeLayer(layerLineas);
   if (layerParadas) map.removeLayer(layerParadas);

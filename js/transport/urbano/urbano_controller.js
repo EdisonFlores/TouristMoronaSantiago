@@ -31,10 +31,13 @@ import {
   setCurrentStopOffsets,
   setStopsLayer,
   setRouteLayer,
+  setAccessLayer,
   resetNearestHighlight,
   setNearestHighlight,
   getCurrentStopMarkers
 } from "../core/transport_state.js";
+
+import { planLineBoardAlightByOrder } from "../core/transport_bus_planner.js";
 
 /* =====================================================
    LIMPIEZA
@@ -75,18 +78,15 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
       selectLinea.innerHTML += `<option value="${l.codigo}">${l.nombre}</option>`;
     });
 
-  // estado local
   let currentLineaSel = null;
   let sentidosCache = [];
   let currentSentido = "";
   let currentCobertura = "";
 
-  // delegation
   container.onchange = async (ev) => {
     const target = ev.target;
     if (!target || !target.id) return;
 
-    // CAMBIO LÍNEA
     if (target.id === "select-linea") {
       const codigo = target.value;
       const linea = lineas.find(l => l.codigo === codigo);
@@ -130,16 +130,13 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
 
     const isL5 = normStr(currentLineaSel.codigo) === "l5";
 
-    // CAMBIO SENTIDO
     if (target.id === "select-sentido") {
       const sentidoSel = titleCase(normStr(target.value));
 
-      // SIEMPRE: al cambiar sentido, limpiar y resetear cobertura
       clearTransportLayers();
       currentSentido = sentidoSel;
       currentCobertura = "";
 
-      // sin sentido => solo sentido sin cobertura
       if (!sentidoSel) {
         renderLineaExtraControls(container, {
           sentidos: sentidosCache,
@@ -149,13 +146,11 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
         return;
       }
 
-      // L3/L4 dibuja directo
       if (!isL5) {
         await mostrarRutaLinea(currentLineaSel, { sentido: currentSentido }, ctx);
         return;
       }
 
-      // L5: re-render sentido + cobertura, pero cobertura VACÍA y NO dibuja
       renderLineaExtraControls(container, {
         sentidos: sentidosCache,
         showCobertura: true,
@@ -171,7 +166,6 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
       return;
     }
 
-    // CAMBIO COBERTURA (L5)
     if (target.id === "select-cobertura") {
       if (!isL5) return;
 
@@ -266,9 +260,7 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
       startPopupLiveUpdate(marker, p);
     });
 
-    marker.on("popupclose", () => {
-      stopPopupLiveUpdate();
-    });
+    marker.on("popupclose", () => stopPopupLiveUpdate());
 
     stopMarkers.push({ marker, parada: p });
   });
@@ -322,4 +314,211 @@ function resaltarYConectarParadaMasCercana(paradas, linea) {
 
   const stopLatLng = [nearest.ubicacion.latitude, nearest.ubicacion.longitude];
   drawDashedAccessRoute(user, stopLatLng, "#666");
+}
+
+/* =====================================================
+   🚌 MODO BUS: línea idónea + paradas + caminatas
+===================================================== */
+async function drawWalkOSRM(layerGroup, fromLatLng, toLatLng) {
+  const profile = "foot";
+  const url =
+    `https://router.project-osrm.org/route/v1/${profile}/` +
+    `${fromLatLng[1]},${fromLatLng[0]};${toLatLng[1]},${toLatLng[0]}?overview=full&geometries=geojson`;
+
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!data.routes?.length) return null;
+
+  const route = data.routes[0];
+  const coords = route.geometry.coordinates.map(c => [c[1], c[0]]);
+  const line = L.polyline(coords, { weight: 4, dashArray: "6 10" }).addTo(layerGroup);
+
+  return { line, route };
+}
+
+export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {}) {
+  if (!userLoc || !destPlace?.ubicacion) return null;
+
+  clearTransportLayers();
+
+  const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
+
+  // ✅ líneas filtradas por cantonpasa / ciudadpasa desde transport_data.js
+  const lineas = await getLineasByTipo("urbano", ctx);
+
+  // ✅ umbrales duros: NO aceptar subidas/bajadas lejanas
+  const MAX_WALK_TO_BOARD = 650;
+  const MAX_WALK_TO_DEST  = 650;
+
+  // ✅ candidatos (sube/baja)
+  const K_BOARD = 25;
+  const K_DEST  = 35;
+
+  // (penalización suave por paradas)
+  const STOPS_PENALTY = 15;
+
+  // guardamos el mejor por ranking balanceado
+  let best = null;
+  let bestLinea = null;
+  let bestParadas = null;
+
+  // ranking del mejor
+  let bestRank = null;
+
+  for (const linea of lineas) {
+    const paradasAll = await getParadasByLinea(linea.codigo, ctx);
+    if (!paradasAll?.length) continue;
+
+    const codigo = normStr(linea.codigo);
+
+    // ✅ L1/L2 circulan en un solo sentido (wrap forward)
+    const isCircularOneWay = (codigo === "l1" || codigo === "l2");
+
+    // ✅ plan por línea (elige SUBIR y BAJAR dentro de esta línea)
+    const plan = planLineBoardAlightByOrder({
+      userLoc,
+      destLoc,
+      stops: paradasAll,
+      isCircularOneWay,
+
+      kBoard: K_BOARD,
+      kDest: K_DEST,
+
+      maxWalkToBoard: MAX_WALK_TO_BOARD,
+      maxWalkToDest: MAX_WALK_TO_DEST,
+
+      // si tu planner lo soporta:
+      stopsPenalty: STOPS_PENALTY
+    });
+
+    if (!plan) continue;
+
+    const m = plan.metrics;
+
+    // seguridad extra
+    if (m.walk1 > MAX_WALK_TO_BOARD) continue;
+    if (m.walk2 > MAX_WALK_TO_DEST) continue;
+
+    // ✅ RANKING BALANCEADO (lo que pediste):
+    // 1) minimizar el peor caminar (max)
+    // 2) minimizar suma caminar
+    // 3) minimizar busDist (coherencia, no dar vueltas)
+    // 4) minimizar stops
+    const rank = {
+      maxWalk: Math.max(m.walk1, m.walk2),
+      sumWalk: m.walk1 + m.walk2,
+      busDist: Number.isFinite(m.busDist) ? m.busDist : 99999999,
+      stops: Number.isFinite(m.stopsCount) ? m.stopsCount : 999999
+    };
+
+    const better =
+      !bestRank ||
+      rank.maxWalk < bestRank.maxWalk ||
+      (rank.maxWalk === bestRank.maxWalk && rank.sumWalk < bestRank.sumWalk) ||
+      (rank.maxWalk === bestRank.maxWalk && rank.sumWalk === bestRank.sumWalk && rank.busDist < bestRank.busDist) ||
+      (rank.maxWalk === bestRank.maxWalk && rank.sumWalk === bestRank.sumWalk && rank.busDist === bestRank.busDist && rank.stops < bestRank.stops);
+
+    if (better) {
+      bestRank = rank;
+      best = plan;
+      bestLinea = linea;
+      bestParadas = paradasAll;
+    }
+  }
+
+  if (!best || !bestLinea || !bestParadas) {
+    if (ui?.infoEl) ui.infoEl.innerHTML = "❌ No se encontró una línea adecuada (paradas cercanas).";
+    return null;
+  }
+
+  // estado popups live
+  setCurrentLinea(bestLinea);
+  bestParadas.sort((a, b) => (Number(a.orden) || 0) - (Number(b.orden) || 0));
+  setCurrentParadas(bestParadas);
+  setCurrentStopOffsets(computeStopOffsets(bestParadas, bestLinea));
+
+  // capas
+  setRouteLayer(null);
+
+  const layerStops = L.layerGroup().addTo(map);
+  setStopsLayer(layerStops);
+
+  const walkLayer = L.layerGroup().addTo(map);
+  setAccessLayer(walkLayer); // ✅ se limpia caminata con clearTransportLayers()
+
+  const boardLL = [best.boardStop.ubicacion.latitude, best.boardStop.ubicacion.longitude];
+  const alightLL = [best.alightStop.ubicacion.latitude, best.alightStop.ubicacion.longitude];
+
+  // paradas del tramo real (opcional)
+  if (Array.isArray(best.pathStops) && best.pathStops.length) {
+    best.pathStops.forEach(p => {
+      const { latitude, longitude } = p.ubicacion || {};
+      if (typeof latitude !== "number" || typeof longitude !== "number") return;
+
+      const isBoard = Number(p.orden) === Number(best.boardStop.orden);
+      const isAlight = Number(p.orden) === Number(best.alightStop.orden);
+      if (isBoard || isAlight) return;
+
+      const mk = L.circleMarker([latitude, longitude], {
+        radius: 5,
+        color: bestLinea.color || "#000",
+        fillOpacity: 0.6,
+        weight: 2
+      })
+        .addTo(layerStops)
+        .bindPopup(buildStopPopupHTML(p, bestLinea), { autoPan: true });
+
+      mk.on("popupopen", () => {
+        mk.setPopupContent(buildStopPopupHTML(p, bestLinea));
+        startPopupLiveUpdate(mk, p);
+      });
+      mk.on("popupclose", stopPopupLiveUpdate);
+    });
+  }
+
+  // subir/bajar
+  const boardMarker = L.circleMarker(boardLL, {
+    radius: 10, color: "#2e7d32", fillColor: "#2e7d32", fillOpacity: 1, weight: 3
+  })
+    .addTo(layerStops)
+    .bindPopup(`<div><b>✅ Subir aquí</b><br>${buildStopPopupHTML(best.boardStop, bestLinea)}</div>`, { autoPan: true });
+
+  const alightMarker = L.circleMarker(alightLL, {
+    radius: 10, color: "#c62828", fillColor: "#c62828", fillOpacity: 1, weight: 3
+  })
+    .addTo(layerStops)
+    .bindPopup(`<div><b>⛔ Bajar aquí</b><br>${buildStopPopupHTML(best.alightStop, bestLinea)}</div>`, { autoPan: true });
+
+  boardMarker.on("popupopen", () => {
+    boardMarker.setPopupContent(`<div><b>✅ Subir aquí</b><br>${buildStopPopupHTML(best.boardStop, bestLinea)}</div>`);
+    startPopupLiveUpdate(boardMarker, best.boardStop);
+  });
+  alightMarker.on("popupopen", () => {
+    alightMarker.setPopupContent(`<div><b>⛔ Bajar aquí</b><br>${buildStopPopupHTML(best.alightStop, bestLinea)}</div>`);
+    startPopupLiveUpdate(alightMarker, best.alightStop);
+  });
+  boardMarker.on("popupclose", stopPopupLiveUpdate);
+  alightMarker.on("popupclose", stopPopupLiveUpdate);
+
+  // caminatas OSRM
+  const w1 = await drawWalkOSRM(walkLayer, userLoc, boardLL);
+  const w2 = await drawWalkOSRM(walkLayer, alightLL, destLoc);
+
+  if (ui?.infoEl) {
+    const walk1m = w1?.route?.distance ? Math.round(w1.route.distance) : Math.round(best.metrics.walk1);
+    const walk2m = w2?.route?.distance ? Math.round(w2.route.distance) : Math.round(best.metrics.walk2);
+
+    ui.infoEl.innerHTML = `
+      <b>Ruta (bus)</b><br>
+      🚌 Línea: <b>${bestLinea.codigo}</b> ${bestLinea.nombre ? `- ${bestLinea.nombre}` : ""}<br>
+      🧭 Sentido: ${best.direction}<br>
+      🚶 Camina a subir: ${walk1m} m<br>
+      🚍 Tramo bus (aprox): ${(best.metrics.busDist / 1000).toFixed(2)} km<br>
+      🚶 Camina al destino: ${walk2m} m<br>
+      🛑 Paradas aprox.: ${best.metrics.stopsCount}
+    `;
+  }
+
+  map.fitBounds(L.latLngBounds([userLoc, destLoc, boardLL, alightLL]).pad(0.2));
+  return { linea: bestLinea, plan: best };
 }

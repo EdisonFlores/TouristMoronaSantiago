@@ -1,6 +1,7 @@
 // js/app/actions.js
-import { setActivePlace, getUserLocation, setMode, getMode } from "./state.js";
+import { setActivePlace, getUserLocation, setMode } from "./state.js";
 import { drawRoute, clearMarkers, renderMarkers } from "../map/map.js";
+import { planAndShowBusStops } from "../transport/transport_controller.js";
 
 /* =========================
    Seleccionar un lugar
@@ -33,10 +34,32 @@ export function selectPlace(place, infoBox) {
 
   // Asociar evento a los botones de modos de transporte
   infoBox.querySelectorAll("button[data-mode]").forEach(btn => {
-    btn.onclick = () => {
+    btn.onclick = async () => {
       const mode = btn.dataset.mode;
       setMode(mode);
-      drawRoute(getUserLocation(), place, mode, document.getElementById("route-info"));
+
+      const infoEl = document.getElementById("route-info");
+      if (infoEl) infoEl.innerHTML = ""; // ✅ limpia antes de pintar algo nuevo
+
+      if (mode === "bus") {
+        const userLoc = getUserLocation();
+
+        // ✅ ctx CORRECTO para filtrar lineas por cantonpasa / ciudadpasa
+        // - canton: cantón del lugar (en tu BD "ciudad" suele ser el cantón en lugar)
+        // - parroquia: parroquia real del lugar destino
+        // Si en tu BD el cantón está en `place.ciudad`, usamos ese fallback.
+        const ctx = {
+          tipo: "urbano",
+          canton: place.canton || place.ciudad || "",
+          parroquia: place.parroquia || ""
+        };
+
+        await planAndShowBusStops(userLoc, place, ctx, { infoEl });
+        return;
+      }
+
+      // otros modos: OSRM normal
+      drawRoute(getUserLocation(), place, mode, infoEl);
     };
   });
 }
@@ -53,7 +76,6 @@ export function findNearest(list) {
 
   list.forEach(p => {
     const { latitude, longitude } = p.ubicacion;
-    // Usamos fórmula de distancia simple (Haversine o L.distance si usamos Leaflet)
     const d = L.latLng(userLoc).distanceTo([latitude, longitude]);
     if (d < minDistance) {
       minDistance = d;

@@ -1,12 +1,17 @@
 /* ================= IMPORTS ================= */
 import { db } from "./services/firebase.js";
 
-import { getProvinciasConDatos, getCantonesConDatos, getParroquiasConDatos } from "./app/selects.js";
+import {
+  getProvinciasConDatos,
+  getCantonesConDatos,
+  getParroquiasConDatos
+} from "./app/selects.js";
+
 import { findNearest } from "./app/actions.js";
 import { dataList, setUserLocation, getUserLocation } from "./app/state.js";
 
 import { map, renderMarkers, clearMarkers, clearRoute, drawRoute } from "./map/map.js";
-import { cargarLineasTransporte, clearTransportLayers } from "./transport/transport_controller.js";
+import { cargarLineasTransporte, clearTransportLayers, planAndShowBusStops } from "./transport/transport_controller.js";
 
 import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
@@ -22,6 +27,10 @@ const category = document.getElementById("category");
 const extra = document.getElementById("extra-controls");
 
 /* ================= HELPERS ================= */
+function clearRouteInfo() {
+  const el = document.getElementById("route-info");
+  if (el) el.innerHTML = "";
+}
 
 /**
  * Reinicia el mapa: quita rutas y marcadores (incluye transporte)
@@ -30,6 +39,7 @@ function resetMap() {
   clearMarkers();
   clearRoute();
   clearTransportLayers();
+  clearRouteInfo();
   activePlace = null;
 }
 
@@ -40,17 +50,42 @@ function resetMap() {
 function showSinglePlace(place) {
   clearMarkers();
   renderMarkers([place], () => {
-    drawRoute(getUserLocation(), place, activeMode, document.getElementById("route-info"));
+    // solo dibujamos ruta "normal" si NO es bus
+    if (activeMode !== "bus") {
+      drawRoute(getUserLocation(), place, activeMode, document.getElementById("route-info"));
+    }
   });
 }
 
 /**
  * Construye la ruta usando el lugar activo y el modo activo
  */
-function buildRoute() {
+async function buildRoute() {
   if (!activePlace) return;
+
   clearRoute();
-  drawRoute(getUserLocation(), activePlace, activeMode, document.getElementById("route-info"));
+  clearTransportLayers();
+  clearRouteInfo();
+
+  const infoEl = document.getElementById("route-info");
+
+  if (activeMode === "bus") {
+    // ✅ ctx para filtrar líneas por cantonpasa/ciudadpasa (parroquia)
+    await planAndShowBusStops(
+      getUserLocation(),
+      activePlace,
+      {
+        tipo: "urbano",
+        provincia: provincia.value,
+        canton: canton.value,
+        ciudad: parroquia.value // (parroquia)
+      },
+      { infoEl }
+    );
+    return;
+  }
+
+  drawRoute(getUserLocation(), activePlace, activeMode, infoEl);
 }
 
 /* ================= GEOLOCALIZACIÓN ================= */
@@ -96,7 +131,6 @@ canton.onchange = async () => {
   parroquia.classList.remove("d-none");
   parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
 
-  // ✅ reset y ocultar categoría al cambiar cantón
   category.value = "";
   category.classList.add("d-none");
 
@@ -110,7 +144,6 @@ canton.onchange = async () => {
 parroquia.onchange = () => {
   resetMap();
 
-  // ✅ al cambiar parroquia: resetear y MOSTRAR categoría para elegir
   category.value = "";
   category.classList.remove("d-none");
 
@@ -127,10 +160,6 @@ category.onchange = async () => {
 
   /* ===== LÍNEAS DE TRANSPORTE ===== */
   if (category.value === "transporte_lineas") {
-    // ✅ IMPORTANTE:
-    // - En transporte NO se usa la lógica "ciudad = cantón".
-    // - El filtrado por cantón se debe hacer en transport_controller.js.
-    // - Aquí solo pasamos el cantón seleccionado para que filtre allá.
     extra.innerHTML = `
       <select id="tipo" class="form-select mb-2">
         <option value="">🚍 Tipo de transporte</option>
@@ -144,36 +173,49 @@ category.onchange = async () => {
     const lineasContainer = document.getElementById("lineas");
 
     tipoSel.onchange = e => {
-      // ✅ ahora enviamos también provincia/cantón (para que transport_controller filtre)
       cargarLineasTransporte(e.target.value, lineasContainer, {
         provincia: provincia.value,
-        canton: canton.value
+        canton: canton.value,
+        ciudad: parroquia.value
       });
     };
 
     return;
   }
 
-  /* ===== LUGARES POR CATEGORÍA ===== */
-  // ✅ SOLO AQUÍ se usa la lógica especial: "ciudad" representa cantón.
+  /* ===== LUGARES POR CATEGORÍA =====
+     ✅ ahora incluye lugares de otras parroquias del mismo cantón,
+     pero PRIORIZA los de la parroquia seleccionada y muestra el indicativo.
+  */
   const snap = await getDocs(collection(db, "lugar"));
+  const all = [];
+
   snap.forEach(d => {
     const l = d.data();
-    if (
-      l.activo &&
-      l.provincia === provincia.value &&
-      l.ciudad === canton.value && // ✅ "ciudad" = cantón SOLO en collection "lugar"
-      l.parroquia === parroquia.value &&
-      l.subcategoria?.toLowerCase() === category.value.toLowerCase()
-    ) {
-      dataList.push(l);
-    }
+    if (!l?.activo) return;
+
+    if (l.provincia !== provincia.value) return;
+    if (l.ciudad !== canton.value) return; // ciudad = cantón en "lugar"
+    if (l.subcategoria?.toLowerCase() !== category.value.toLowerCase()) return;
+
+    all.push(l);
   });
 
-  if (!dataList.length) {
+  if (!all.length) {
     extra.innerHTML = "❌ No hay lugares en esta categoría.";
     return;
   }
+
+  // ✅ ordenar: primero parroquia seleccionada, luego el resto
+  const parroquiaSel = parroquia.value;
+  all.sort((a, b) => {
+    const aKey = (a.parroquia === parroquiaSel) ? 0 : 1;
+    const bKey = (b.parroquia === parroquiaSel) ? 0 : 1;
+    if (aKey !== bKey) return aKey - bKey;
+    return String(a.nombre || "").localeCompare(String(b.nombre || ""));
+  });
+
+  dataList.push(...all);
 
   /* ===== CONTROLES ===== */
   extra.innerHTML = `
@@ -199,7 +241,8 @@ category.onchange = async () => {
   const sel = document.getElementById("lugares");
 
   dataList.forEach((l, i) => {
-    sel.innerHTML += `<option value="${i}">${l.nombre}</option>`;
+    const ptxt = l.parroquia ? ` (Parroquia: ${l.parroquia})` : "";
+    sel.innerHTML += `<option value="${i}">${l.nombre || "Lugar"}${ptxt}</option>`;
   });
 
   renderMarkers(dataList, place => {
