@@ -30,18 +30,19 @@ function nearestK(stopsNorm, pointLatLng, k = 25, requireSentido = null) {
   return ranked.slice(0, Math.max(1, k));
 }
 
-// distancia por secuencia del orden (aprox)
-function busDistanceMeters(orderedStops, idxA, idxB, isCircularOneWay) {
+/**
+ * Distancia aproximada siguiendo el recorrido real por orden:
+ * - NO circular one-way: SOLO forward (idxA >= idxB) sin wrap.
+ * - circular one-way (L1/L2): forward con wrap.
+ */
+function busDistanceMetersForward(orderedStops, idxB, idxA, isCircularOneWay) {
   const n = orderedStops.length;
   if (n < 2) return Infinity;
 
   if (!isCircularOneWay) {
-    // si no es one-way circular: tomamos el tramo corto entre idxA y idxB (en orden de lista)
-    const a = Math.min(idxA, idxB);
-    const b = Math.max(idxA, idxB);
-
+    if (idxA < idxB) return Infinity; // no se puede “ir hacia atrás”
     let acc = 0;
-    for (let i = a + 1; i <= b; i++) {
+    for (let i = idxB + 1; i <= idxA; i++) {
       const prev = stopLatLng(orderedStops[i - 1]);
       const cur = stopLatLng(orderedStops[i]);
       if (!prev || !cur) continue;
@@ -50,27 +51,90 @@ function busDistanceMeters(orderedStops, idxA, idxB, isCircularOneWay) {
     return acc;
   }
 
-  // one-way circular: SOLO avanzar (con wrap)
+  // circular one-way: avanzar con wrap
   let acc = 0;
-  let i = idxA;
-  while (i !== idxB) {
+  let steps = 0;
+  let i = idxB;
+  while (i !== idxA) {
     const j = (i + 1) % n;
     const prev = stopLatLng(orderedStops[i]);
     const cur = stopLatLng(orderedStops[j]);
     if (prev && cur) acc += distMeters(prev, cur);
     i = j;
-
-    // seguridad para evitar loops raros
-    if (acc > 100000) break; // 100 km
+    steps++;
+    if (steps > n + 2) return Infinity; // seguridad (más de una vuelta)
+    if (acc > 200000) return Infinity; // seguridad (200km)
   }
   return acc;
 }
 
-function forwardStopsCount(idxA, idxB, n, isCircularOneWay) {
-  if (!isCircularOneWay) return Math.abs(idxB - idxA);
-  // one-way circular: contar avanzando con wrap
-  if (idxB >= idxA) return idxB - idxA;
-  return (n - idxA) + idxB;
+function forwardStopsCount(idxB, idxA, n, isCircularOneWay) {
+  if (!isCircularOneWay) {
+    if (idxA < idxB) return Infinity;
+    return idxA - idxB;
+  }
+  if (idxA >= idxB) return idxA - idxB;
+  return (n - idxB) + idxA;
+}
+
+function buildPathStops(ordered, idxB, idxA, isCircularOneWay) {
+  const n = ordered.length;
+  if (!n) return [];
+
+  if (!isCircularOneWay) {
+    if (idxA < idxB) return [];
+    return ordered.slice(idxB, idxA + 1);
+  }
+
+  const path = [];
+  let i = idxB;
+  path.push(ordered[i]);
+  let steps = 0;
+  while (i !== idxA) {
+    i = (i + 1) % n;
+    path.push(ordered[i]);
+    steps++;
+    if (steps > n + 2) break;
+  }
+  return path;
+}
+
+/**
+ * Selección BALANCEADA:
+ * 1) minimizar maxWalk (evita que una caminata se dispare)
+ * 2) minimizar sumWalk
+ * 3) minimizar stopsCount (muy importante para L1/L2 y evitar “vuelta”)
+ * 4) minimizar busDist
+ * 5) desempate: si lo demás es parecido => preferir walk1 menor (subida más cerca)
+ */
+function isBetterCandidate(cand, best) {
+  const r1 = cand._rank;
+  const r2 = best._rank;
+
+  // tolerancias para evitar que por “ganar 1m en walk2” te mueva la subida 200m
+  const T_MAXW = 25;   // m
+  const T_SUMW = 35;   // m
+  const T_STOP = 1;    // paradas
+  const T_BUS  = 80;   // m
+
+  if (r1.maxWalk < r2.maxWalk - T_MAXW) return true;
+  if (Math.abs(r1.maxWalk - r2.maxWalk) <= T_MAXW) {
+    if (r1.sumWalk < r2.sumWalk - T_SUMW) return true;
+    if (Math.abs(r1.sumWalk - r2.sumWalk) <= T_SUMW) {
+      if (r1.stopsCount < r2.stopsCount - T_STOP) return true;
+      if (Math.abs(r1.stopsCount - r2.stopsCount) <= T_STOP) {
+        if (r1.busDist < r2.busDist - T_BUS) return true;
+
+        // ✅ FIX CLAVE: si está “empatado”, preferir subida más cerca
+        if (Math.abs(r1.busDist - r2.busDist) <= T_BUS) {
+          if (cand.metrics.walk1 < best.metrics.walk1) return true;
+        }
+      }
+    }
+  }
+
+  // fallback estricto por tieScore
+  return r1.tieScore < r2.tieScore;
 }
 
 /**
@@ -78,8 +142,9 @@ function forwardStopsCount(idxA, idxB, n, isCircularOneWay) {
  *
  * - Evalúa kBoard paradas más cercanas al usuario y kDest más cercanas al destino
  * - Filtra por umbrales (maxWalkToBoard / maxWalkToDest)
- * - Respeta sentido si existe (mismo sentido si ambos lo traen)
- * - Respeta circular one-way (L1/L2): solo avanzar con wrap
+ * - Respeta sentido si ambos lo tienen (si ambos traen sentido, deben coincidir)
+ * - Respeta circular one-way (L1/L2): avanzar con wrap
+ * - NO circular: solo forward (idxA >= idxB)
  */
 export function planLineBoardAlightByOrder({
   userLoc,
@@ -93,8 +158,8 @@ export function planLineBoardAlightByOrder({
   maxWalkToBoard = 650,
   maxWalkToDest = 650,
 
-  // penalización opcional por paradas
-  stopsPenalty = 15
+  // penalización por paradas (sube esto para L1/L2 y evitar vueltas)
+  stopsPenalty = 25
 }) {
   if (!userLoc || !destLoc) return null;
 
@@ -106,13 +171,11 @@ export function planLineBoardAlightByOrder({
 
   const stopsNorm = normalizeStops(ordered);
 
-  // candidatos cercanos
   const boards = nearestK(stopsNorm, userLoc, kBoard);
   const dests = nearestK(stopsNorm, destLoc, kDest);
 
   let best = null;
 
-  // mapa orden->idx (por si hay orden repetido, usa idx real)
   const idxByRef = new Map();
   ordered.forEach((s, i) => idxByRef.set(s, i));
 
@@ -131,35 +194,28 @@ export function planLineBoardAlightByOrder({
       const idxA = idxByRef.get(a.stop);
       if (idxB == null || idxA == null) continue;
 
-      // circular one-way: siempre se puede llegar avanzando (wrap), OK.
-      // no circular one-way: aceptamos ambos sentidos.
-      const busDist = busDistanceMeters(ordered, idxB, idxA, isCircularOneWay);
+      const busDist = busDistanceMetersForward(ordered, idxB, idxA, isCircularOneWay);
       if (!Number.isFinite(busDist) || busDist === Infinity) continue;
 
       const stopsCount = forwardStopsCount(idxB, idxA, ordered.length, isCircularOneWay);
+      if (!Number.isFinite(stopsCount) || stopsCount === Infinity) continue;
 
-      // ---- CRITERIO BALANCEADO (minimax) ----
       const maxWalk = Math.max(b.d, a.d);
       const sumWalk = b.d + a.d;
 
-      // score auxiliar para desempate final
-      const tieScore = sumWalk + busDist + (stopsPenalty * stopsCount);
+      const tieScore = (maxWalk * 2) + sumWalk + busDist + (stopsPenalty * stopsCount);
 
       const candidate = {
         boardStop: b.stop,
         alightStop: a.stop,
-        direction:
-          b.stop?.sentido ??
-          (isCircularOneWay ? "CIRCULAR" : (idxB <= idxA ? "ADELANTE" : "ATRAS")),
+        direction: b.stop?.sentido ?? (isCircularOneWay ? "CIRCULAR" : "ADELANTE"),
         metrics: {
           walk1: b.d,
           walk2: a.d,
           busDist,
           stopsCount
         },
-        // para selección
         _rank: { maxWalk, sumWalk, busDist, stopsCount, tieScore },
-        // opcional: paradas del tramo real para dibujar puntos
         pathStops: buildPathStops(ordered, idxB, idxA, isCircularOneWay)
       };
 
@@ -168,46 +224,11 @@ export function planLineBoardAlightByOrder({
         continue;
       }
 
-      // orden lexicográfico de criterios (minimax)
-      const r1 = candidate._rank;
-      const r2 = best._rank;
-
-      const better =
-        r1.maxWalk < r2.maxWalk ||
-        (r1.maxWalk === r2.maxWalk && r1.sumWalk < r2.sumWalk) ||
-        (r1.maxWalk === r2.maxWalk && r1.sumWalk === r2.sumWalk && r1.busDist < r2.busDist) ||
-        (r1.maxWalk === r2.maxWalk && r1.sumWalk === r2.sumWalk && r1.busDist === r2.busDist && r1.stopsCount < r2.stopsCount) ||
-        (r1.maxWalk === r2.maxWalk && r1.sumWalk === r2.sumWalk && r1.busDist === r2.busDist && r1.stopsCount === r2.stopsCount && r1.tieScore < r2.tieScore);
-
-      if (better) best = candidate;
+      if (isBetterCandidate(candidate, best)) best = candidate;
     }
   }
 
   if (!best) return null;
-
-  // limpia campos internos
   delete best._rank;
   return best;
-}
-
-function buildPathStops(ordered, idxB, idxA, isCircularOneWay) {
-  const n = ordered.length;
-  if (!n) return [];
-
-  if (!isCircularOneWay) {
-    const a = Math.min(idxB, idxA);
-    const b = Math.max(idxB, idxA);
-    return ordered.slice(a, b + 1);
-  }
-
-  // one-way circular: avanzar con wrap desde idxB hasta idxA
-  const path = [];
-  let i = idxB;
-  path.push(ordered[i]);
-  while (i !== idxA) {
-    i = (i + 1) % n;
-    path.push(ordered[i]);
-    if (path.length > n + 2) break;
-  }
-  return path;
 }
