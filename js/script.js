@@ -11,8 +11,8 @@ import { cargarLineasTransporte, clearTransportLayers } from "./transport/transp
 import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
 /* ================= ESTADO GLOBAL ================= */
-let activePlace = null;      // Lugar seleccionado
-let activeMode = "walking";  // Modo de transporte seleccionado
+let activePlace = null;
+let activeMode = "walking";
 
 /* ================= ELEMENTOS DEL DOM ================= */
 const provincia = document.getElementById("provincia");
@@ -29,7 +29,7 @@ const extra = document.getElementById("extra-controls");
 function resetMap() {
   clearMarkers();
   clearRoute();
-  clearTransportLayers(); // ✅ limpia ruta del bus + paradas + dashed + timer
+  clearTransportLayers();
   activePlace = null;
 }
 
@@ -38,7 +38,7 @@ function resetMap() {
  * @param {Object} place Lugar a mostrar
  */
 function showSinglePlace(place) {
-  clearMarkers(); // Solo se muestra este marcador
+  clearMarkers();
   renderMarkers([place], () => {
     drawRoute(getUserLocation(), place, activeMode, document.getElementById("route-info"));
   });
@@ -58,16 +58,14 @@ navigator.geolocation.getCurrentPosition(pos => {
   const loc = [pos.coords.latitude, pos.coords.longitude];
   setUserLocation(loc);
 
-  L.marker(loc)
-    .addTo(map)
-    .bindPopup("📍 Tu ubicación");
+  L.marker(loc).addTo(map).bindPopup("📍 Tu ubicación");
 });
 
 /* ================= CARGAR PROVINCIAS ================= */
 (async () => {
   const provincias = await getProvinciasConDatos();
   provincia.innerHTML = `<option value="">🏞️ Seleccione provincia</option>`;
-  provincias.forEach(p => provincia.innerHTML += `<option value="${p}">${p}</option>`);
+  provincias.forEach(p => (provincia.innerHTML += `<option value="${p}">${p}</option>`));
 })();
 
 /* ================= EVENTO PROVINCIA ================= */
@@ -76,18 +74,18 @@ provincia.onchange = async () => {
 
   canton.disabled = false;
   canton.innerHTML = `<option value="">🏙️ Seleccione cantón</option>`;
+
   parroquia.classList.add("d-none");
   parroquia.disabled = true;
   parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
 
-  // ✅ reset y ocultar categoría
   category.value = "";
   category.classList.add("d-none");
 
   extra.innerHTML = "";
 
   const cantones = await getCantonesConDatos(provincia.value);
-  cantones.forEach(c => canton.innerHTML += `<option value="${c}">${c}</option>`);
+  cantones.forEach(c => (canton.innerHTML += `<option value="${c}">${c}</option>`));
 };
 
 /* ================= EVENTO CANTÓN ================= */
@@ -98,25 +96,23 @@ canton.onchange = async () => {
   parroquia.classList.remove("d-none");
   parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
 
-  // ✅ reset y ocultar categoría
+  // ✅ reset y ocultar categoría al cambiar cantón
   category.value = "";
   category.classList.add("d-none");
 
   extra.innerHTML = "";
 
   const parroquias = await getParroquiasConDatos(provincia.value, canton.value);
-  parroquias.forEach(p => parroquia.innerHTML += `<option value="${p}">${p}</option>`);
+  parroquias.forEach(p => (parroquia.innerHTML += `<option value="${p}">${p}</option>`));
 };
 
 /* ================= EVENTO PARROQUIA ================= */
 parroquia.onchange = () => {
   resetMap();
 
-  // ✅ aquí pediste: ocultar y resetear categoría hasta que se vuelva a escoger
+  // ✅ al cambiar parroquia: resetear y MOSTRAR categoría para elegir
   category.value = "";
-  category.classList.remove("d-none"); // mostrar para que el usuario escoja categoría
-  // Si tú lo quieres OCULTO hasta otra acción, cambia a:
-  // category.classList.add("d-none");
+  category.classList.remove("d-none");
 
   extra.innerHTML = "";
 };
@@ -131,6 +127,10 @@ category.onchange = async () => {
 
   /* ===== LÍNEAS DE TRANSPORTE ===== */
   if (category.value === "transporte_lineas") {
+    // ✅ IMPORTANTE:
+    // - En transporte NO se usa la lógica "ciudad = cantón".
+    // - El filtrado por cantón se debe hacer en transport_controller.js.
+    // - Aquí solo pasamos el cantón seleccionado para que filtre allá.
     extra.innerHTML = `
       <select id="tipo" class="form-select mb-2">
         <option value="">🚍 Tipo de transporte</option>
@@ -140,20 +140,29 @@ category.onchange = async () => {
       <div id="lineas"></div>
     `;
 
-    document.getElementById("tipo").onchange = e =>
-      cargarLineasTransporte(e.target.value, document.getElementById("lineas"));
+    const tipoSel = document.getElementById("tipo");
+    const lineasContainer = document.getElementById("lineas");
+
+    tipoSel.onchange = e => {
+      // ✅ ahora enviamos también provincia/cantón (para que transport_controller filtre)
+      cargarLineasTransporte(e.target.value, lineasContainer, {
+        provincia: provincia.value,
+        canton: canton.value
+      });
+    };
 
     return;
   }
 
   /* ===== LUGARES POR CATEGORÍA ===== */
+  // ✅ SOLO AQUÍ se usa la lógica especial: "ciudad" representa cantón.
   const snap = await getDocs(collection(db, "lugar"));
   snap.forEach(d => {
     const l = d.data();
     if (
       l.activo &&
       l.provincia === provincia.value &&
-      l.ciudad === canton.value &&
+      l.ciudad === canton.value && // ✅ "ciudad" = cantón SOLO en collection "lugar"
       l.parroquia === parroquia.value &&
       l.subcategoria?.toLowerCase() === category.value.toLowerCase()
     ) {
