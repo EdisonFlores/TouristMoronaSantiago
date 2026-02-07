@@ -44,122 +44,139 @@ function toNormArrayKey(v) {
 }
 
 /* ==========================
-   HORARIOS
+   HELPERS HORARIO
 ========================== */
-function parseHHMM(s) {
-  const m = String(s || "").trim().match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  const hh = Number(m[1]), mm = Number(m[2]);
-  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
-  return (hh * 60) + mm;
-}
-
-function minutesNow(now) {
-  return now.getHours() * 60 + now.getMinutes();
-}
-
-function isWeekend(now) {
-  const d = now.getDay(); // 0 dom, 6 sáb
+function isWeekend(now = new Date()) {
+  const d = now.getDay(); // 0 dom ... 6 sab
   return d === 0 || d === 6;
 }
 
-// Ej: "06:00 a 08:00"
-function parseRangeText(txt) {
-  const t = String(txt || "").toLowerCase();
-  const m = t.match(/(\d{1,2}:\d{2})\s*a\s*(\d{1,2}:\d{2})/);
+function parseHHMM(s) {
+  const m = String(s || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  return hh * 60 + mm;
+}
+
+function nowMinutes(now) {
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+// "06:00 a 08:00"
+function parseRangeES(s) {
+  const t = String(s || "").trim();
+  const m = t.match(/(\d{1,2}:\d{2})\s*a\s*(\d{1,2}:\d{2})/i);
   if (!m) return null;
   const a = parseHHMM(m[1]);
   const b = parseHHMM(m[2]);
   if (a == null || b == null) return null;
-  return { a, b };
-}
-
-function isNowInAnyWeekendRange(linea, now) {
-  if (!Array.isArray(linea?.horariofinsem) || !linea.horariofinsem.length) return null;
-
-  const cur = minutesNow(now);
-  for (const r of linea.horariofinsem) {
-    const range = parseRangeText(r);
-    if (!range) continue;
-    if (cur >= range.a && cur <= range.b) return true;
-  }
-  return false;
+  return { start: a, end: b };
 }
 
 /**
- * ✅ Exportada: sirve para “fuera de servicio”
+ * ¿Está operativa ahora?
+ * - Semana: horario_inicio / horario_fin
+ * - Finde:
+ *   - si trae horariofinsem (array de rangos "HH:MM a HH:MM"), valida por rangos
+ *   - si no trae, usa horario_inicio/horario_fin como fallback
  */
 export function isLineOperatingNow(linea, now = new Date()) {
   if (!linea?.activo) return false;
 
-  const weekend = isWeekend(now);
+  const cur = nowMinutes(now);
+  const wknd = isWeekend(now);
 
-  // 1) Si es finde y trae horariofinsem => manda
-  if (weekend) {
-    const okByRanges = isNowInAnyWeekendRange(linea, now);
-    if (okByRanges === true) return true;
-    if (okByRanges === false) return false;
-    // si null => no tiene horariofinsem, caemos al fallback diario
+  if (wknd && Array.isArray(linea.horariofinsem) && linea.horariofinsem.length) {
+    for (const r of linea.horariofinsem) {
+      const rr = parseRangeES(r);
+      if (!rr) continue;
+      // rango normal (no cruza medianoche)
+      if (rr.start <= cur && cur <= rr.end) return true;
+    }
+    return false;
   }
 
-  // 2) Fallback: horario_inicio/fin
-  const a = parseHHMM(linea.horario_inicio);
-  const b = parseHHMM(linea.horario_fin);
-  if (a == null || b == null) return true; // si faltan horarios, no bloqueamos
+  // fallback horario normal
+  const ini = parseHHMM(linea.horario_inicio);
+  const fin = parseHHMM(linea.horario_fin);
+  if (ini == null || fin == null) return true; // si no hay datos, no bloqueamos
 
-  const cur = minutesNow(now);
+  if (ini <= fin) return cur >= ini && cur <= fin;
 
-  // rango normal
-  if (a <= b) return cur >= a && cur <= b;
+  // si cruzara medianoche (raro en tus datos, pero por seguridad)
+  return cur >= ini || cur <= fin;
+}
 
-  // rango cruzando medianoche
-  return cur >= a || cur <= b;
+export function formatLineScheduleHTML(linea) {
+  const hIni = String(linea?.horario_inicio || "").trim();
+  const hFin = String(linea?.horario_fin || "").trim();
+  const freq = Number(linea?.frecuencia_min);
+  const freqFS = Number(linea?.frecuenciafinsem);
+
+  const weekday = (hIni && hFin)
+    ? `🗓️ <b>Lun–Vie</b>: ${hIni} – ${hFin}`
+    : `🗓️ <b>Lun–Vie</b>: (sin horario registrado)`;
+
+  const freqTxt = Number.isFinite(freq)
+    ? `⏱️ <b>Frecuencia</b>: cada ${freq} min`
+    : `⏱️ <b>Frecuencia</b>: (sin dato)`;
+
+  let weekend = "";
+  if (Array.isArray(linea?.horariofinsem) && linea.horariofinsem.length) {
+    weekend = `
+      📆 <b>Fin de semana</b>:
+      <div class="mt-1">${linea.horariofinsem.map(x => `• ${x}`).join("<br>")}</div>
+    `;
+  } else if (hIni && hFin) {
+    weekend = `📆 <b>Fin de semana</b>: ${hIni} – ${hFin}`;
+  } else {
+    weekend = `📆 <b>Fin de semana</b>: (sin horario registrado)`;
+  }
+
+  const freqFSTxt = Number.isFinite(freqFS)
+    ? `⏱️ <b>Frecuencia (FS)</b>: cada ${freqFS} min`
+    : ``;
+
+  return `
+    ${weekday}<br>
+    ${freqTxt}<br>
+    ${weekend}<br>
+    ${freqFSTxt ? `${freqFSTxt}<br>` : ""}
+  `;
 }
 
 /* ==========================
-   FILTROS POR UBICACIÓN
-========================== */
-function passGeoFilters(l, ctx = {}) {
-  const cantonSel = normKey(ctx?.canton);
-  const parroquiaSel = normKey(ctx?.parroquia); // ciudadpasa = parroquias
-
-  // ✅ FILTRO CANTÓN
-  if (cantonSel) {
-    const cantones = toNormArrayKey(l.cantonpasa);
-    const ok = cantones.includes(cantonSel) || normKey(l.canton) === cantonSel;
-    if (!ok) return false;
-  }
-
-  // ✅ FILTRO PARROQUIA (ciudadpasa)
-  if (parroquiaSel) {
-    const parroquias = toNormArrayKey(l.ciudadpasa);
-    const ok = parroquias.includes(parroquiaSel) || normKey(l.ciudad) === parroquiaSel;
-    if (!ok) return false;
-  }
-
-  return true;
-}
-
-/* ==========================
-   LÍNEAS (solo operativas)
-   ctx: { canton, parroquia, now }
+   LÍNEAS (filtradas) para el app
+   ctx: { canton, parroquia }
 ========================== */
 export async function getLineasByTipo(tipo, ctx = {}) {
   const t = normStr(tipo);
   const snap = await getDocs(collection(db, "lineas_transporte"));
   const out = [];
-  const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
+
+  const cantonSel = normKey(ctx?.canton);
+  const parroquiaSel = normKey(ctx?.parroquia); // en tu BD: ciudadpasa = parroquias
 
   snap.forEach(d => {
     const l = d.data();
     if (!l?.activo) return;
     if (normStr(l.tipo) !== t) return;
 
-    // geo
-    if (!passGeoFilters(l, ctx)) return;
+    // filtro cantón
+    if (cantonSel) {
+      const cantones = toNormArrayKey(l.cantonpasa);
+      const ok = cantones.includes(cantonSel) || normKey(l.canton) === cantonSel;
+      if (!ok) return;
+    }
 
-    // horario
-    if (!isLineOperatingNow(l, now)) return;
+    // filtro parroquia (ciudadpasa)
+    if (parroquiaSel) {
+      const parroquias = toNormArrayKey(l.ciudadpasa);
+      const ok = parroquias.includes(parroquiaSel) || normKey(l.ciudad) === parroquiaSel;
+      if (!ok) return;
+    }
 
     out.push({ id: d.id, ...l });
   });
@@ -167,25 +184,12 @@ export async function getLineasByTipo(tipo, ctx = {}) {
   return out;
 }
 
-/* ==========================
-   LÍNEAS (todas, incluso fuera de servicio)
-   ✅ para mostrar “fuera de servicio” en UI
-========================== */
+/**
+ * ✅ Necesaria para la UI de “líneas”: trae TODAS (aunque estén fuera de servicio),
+ * pero sí respeta canton/pasa + parroquia/pasa (zona).
+ */
 export async function getLineasByTipoAll(tipo, ctx = {}) {
-  const t = normStr(tipo);
-  const snap = await getDocs(collection(db, "lineas_transporte"));
-  const out = [];
-
-  snap.forEach(d => {
-    const l = d.data();
-    if (!l?.activo) return;
-    if (normStr(l.tipo) !== t) return;
-    if (!passGeoFilters(l, ctx)) return;
-
-    out.push({ id: d.id, ...l });
-  });
-
-  return out;
+  return getLineasByTipo(tipo, ctx);
 }
 
 /* ==========================

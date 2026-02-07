@@ -18,8 +18,12 @@ import {
   planAndShowBusStops
 } from "./transport/transport_controller.js";
 
-// ✅ para mostrar “fuera de servicio”
-import { getLineasByTipoAll, isLineOperatingNow } from "./transport/core/transport_data.js";
+// ✅ horario + estado operación
+import {
+  getLineasByTipoAll,
+  isLineOperatingNow,
+  formatLineScheduleHTML
+} from "./transport/core/transport_data.js";
 
 import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
@@ -33,6 +37,59 @@ const canton = document.getElementById("canton");
 const parroquia = document.getElementById("parroquia");
 const category = document.getElementById("category");
 const extra = document.getElementById("extra-controls");
+
+function ensureModal() {
+  let modal = document.getElementById("app-modal");
+  if (modal) return modal;
+
+  modal = document.createElement("div");
+  modal.id = "app-modal";
+  modal.className = "modal fade";
+  modal.tabIndex = -1;
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="app-modal-title">Aviso</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body" id="app-modal-body"></div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function showAppPopup(html, { title = "Aviso" } = {}) {
+  const modalEl = ensureModal();
+  modalEl.querySelector("#app-modal-title").textContent = title;
+
+  modalEl.querySelector("#app-modal-body").innerHTML = `
+    ${html}
+    <div class="small text-muted mt-3">
+      ⓘ Los tiempos y paradas mostrados son <b>aproximados</b> (no en tiempo real).
+    </div>
+  `;
+
+  // Bootstrap Modal (requiere bootstrap.js cargado)
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl, {
+    backdrop: true,
+    keyboard: true
+  });
+  modal.show();
+}
+
+function clearPopupIfAny() {
+  const modalEl = document.getElementById("app-modal");
+  if (!modalEl) return;
+  const inst = bootstrap.Modal.getInstance(modalEl);
+  if (inst) inst.hide();
+}
+
 
 /* ================= HELPERS ================= */
 function clearRouteInfo() {
@@ -48,6 +105,7 @@ function resetMap() {
   clearRoute();
   clearTransportLayers();
   clearRouteInfo();
+  clearPopupIfAny();
   activePlace = null;
 }
 
@@ -72,10 +130,20 @@ async function buildRoute() {
   clearRoute();
   clearTransportLayers();
   clearRouteInfo();
+  clearPopupIfAny();
 
   const infoEl = document.getElementById("route-info");
 
   if (activeMode === "bus") {
+    if (infoEl) {
+      infoEl.innerHTML = `
+        <div class="alert alert-info py-2 mb-2">
+          🚌 <b>Por favor espere…</b><br>
+          Estamos buscando una ruta de bus (paradas cercanas + línea idónea)…
+        </div>
+      `;
+    }
+
     await planAndShowBusStops(
       getUserLocation(),
       activePlace,
@@ -84,7 +152,7 @@ async function buildRoute() {
         provincia: provincia.value,
         canton: canton.value,
         parroquia: parroquia.value,
-        now: new Date() // ✅ importante para horario (finde vs diario)
+        now: new Date()
       },
       { infoEl }
     );
@@ -114,7 +182,12 @@ navigator.geolocation.getCurrentPosition(async pos => {
       provincia.value = admin.provincia;
       provincia.disabled = true;
     } else {
-      extra.innerHTML = `❌ Aún no hay datos para tu provincia: <b>${admin.provincia || "desconocida"}</b>`;
+      extra.innerHTML = `
+        <div class="alert alert-info py-2">
+          ❌ Aún no hay datos para tu provincia: <b>${admin.provincia || "desconocida"}</b><br>
+          Muy pronto estará disponible para tu zona.
+        </div>
+      `;
       return;
     }
 
@@ -128,12 +201,18 @@ navigator.geolocation.getCurrentPosition(async pos => {
       canton.value = admin.canton;
       canton.disabled = true;
     } else {
-      extra.innerHTML = `❌ Aún no hay datos para tu cantón: <b>${admin.canton || "desconocido"}</b>`;
+      extra.innerHTML = `
+        <div class="alert alert-info py-2">
+          ❌ Aún no hay datos para tu cantón: <b>${admin.canton || "desconocido"}</b><br>
+          Muy pronto estará disponible para tu zona.
+        </div>
+      `;
       return;
     }
 
-    // 4) parroquias (ahora incluye también ciudadpasa de lineas)
+    // 4) parroquias (✅ SOLO las que tienen lugares en BD)
     const parroquias = await getParroquiasConDatos(provincia.value, canton.value);
+
     parroquia.disabled = false;
     parroquia.classList.remove("d-none");
     parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
@@ -148,7 +227,11 @@ navigator.geolocation.getCurrentPosition(async pos => {
     category.classList.remove("d-none");
 
   } catch (e) {
-    extra.innerHTML = "❌ No se pudo detectar provincia/cantón/parroquia automáticamente.";
+    extra.innerHTML = `
+      <div class="alert alert-warning py-2">
+        ❌ No se pudo detectar provincia/cantón/parroquia automáticamente.
+      </div>
+    `;
     console.error(e);
   }
 });
@@ -186,6 +269,7 @@ canton.onchange = async () => {
 
   extra.innerHTML = "";
 
+  // ✅ SOLO parroquias con lugares
   const parroquias = await getParroquiasConDatos(provincia.value, canton.value);
   parroquias.forEach(p => (parroquia.innerHTML += `<option value="${p}">${p}</option>`));
 };
@@ -208,10 +292,7 @@ category.onchange = async () => {
 
   /* ===== LÍNEAS DE TRANSPORTE ===== */
   if (category.value === "transporte_lineas") {
-    
     extra.innerHTML = `
-      <div id="lineas-status" class="small mb-2"></div>
-
       <select id="tipo" class="form-select mb-2">
         <option value="">🚍 Tipo de transporte</option>
         <option value="urbano">Urbano</option>
@@ -223,54 +304,82 @@ category.onchange = async () => {
 
     const tipoSel = document.getElementById("tipo");
     const lineasContainer = document.getElementById("lineas");
-    const statusEl = document.getElementById("lineas-status");
 
-    tipoSel.onchange = async e => {
+    // cache local para mostrar popup al elegir línea
+    let lineMap = new Map();
+    let tipoActual = "";
+
+    // Delegación: solo en esta categoría
+    lineasContainer.addEventListener("change", (ev) => {
+      const t = ev.target;
+
+      // popup SOLO cuando se selecciona una línea
+      if (t && t.id === "select-linea") {
+        const codigo = t.value;
+        if (!codigo) return;
+
+        const l = lineMap.get(codigo);
+        if (!l) return;
+
+        const now = new Date();
+        const op = isLineOperatingNow(l, now);
+
+        const nowTxt = now.toLocaleTimeString("es-EC", { hour: "2-digit", minute: "2-digit" });
+
+        if (!op) {
+          showAppPopup(
+            `
+              ⛔ <b>${l.codigo}</b> ${l.nombre ? `- ${l.nombre}` : ""}<br>
+              <div class="mt-2">
+                <b>Estado:</b> Fuera de servicio ahora<br>
+                🕒 <b>Hora actual:</b> ${nowTxt}
+              </div>
+              <hr class="my-2">
+              ${formatLineScheduleHTML(l)}
+            `,
+            { title: "Línea fuera de servicio" }
+          );
+        } else {
+          showAppPopup(
+            `
+              ✅ <b>${l.codigo}</b> ${l.nombre ? `- ${l.nombre}` : ""}<br>
+              <div class="mt-2">
+                <b>Estado:</b> Operativa ahora<br>
+                🕒 <b>Hora actual:</b> ${nowTxt}
+              </div>
+              <hr class="my-2">
+              ${formatLineScheduleHTML(l)}
+            `,
+            { title: "Horario y frecuencia" }
+          );
+        }
+      }
+    });
+
+    tipoSel.onchange = async (e) => {
       const tipo = e.target.value;
+      tipoActual = tipo;
       lineasContainer.innerHTML = "";
-      if (statusEl) statusEl.innerHTML = "";
+      lineMap = new Map();
+      clearPopupIfAny();
 
-      if (!tipo) return;
+      if (!tipoActual) return;
 
-      // ✅ 1) traer TODAS las líneas del área (aunque estén fuera de servicio)
+      // ✅ 1) traer líneas del área para poder mostrar popup por código
       const ctxGeo = {
         canton: canton.value,
         parroquia: parroquia.value
       };
 
-      const allLineas = await getLineasByTipoAll(tipo, ctxGeo);
-      const now = new Date();
+      const allLineas = await getLineasByTipoAll(tipoActual, ctxGeo);
+      allLineas.forEach(l => lineMap.set(l.codigo, l));
 
-      const fuera = allLineas
-        .filter(l => !isLineOperatingNow(l, now))
-        .sort((a, b) => (Number(a.orden) || 0) - (Number(b.orden) || 0));
-
-      // ✅ 2) mostrar mensaje “fuera de servicio”
-      if (statusEl) {
-        if (!allLineas.length) {
-          statusEl.innerHTML = `❌ No hay líneas registradas para esta zona.`;
-        } else if (!fuera.length) {
-          statusEl.innerHTML = `✅ Todas las líneas están operativas ahora.`;
-        } else {
-          const items = fuera
-            .map(l => `• <b>${l.codigo}</b> ${l.nombre ? `- ${l.nombre}` : ""}`)
-            .join("<br>");
-
-          statusEl.innerHTML = `
-            <div class="alert alert-warning py-2 mb-2">
-              ⛔ <b>Fuera de servicio ahora</b> (por horario):
-              <div class="mt-1">${items}</div>
-            </div>
-          `;
-        }
-      }
-
-      // ✅ 3) cargar UI normal (solo líneas operativas por horario)
-      cargarLineasTransporte(tipo, lineasContainer, {
+      // ✅ 2) UI normal (tu módulo urbano/rural se encarga)
+      cargarLineasTransporte(tipoActual, lineasContainer, {
         provincia: provincia.value,
         canton: canton.value,
         parroquia: parroquia.value,
-        now
+        now: new Date()
       });
     };
 
@@ -293,11 +402,10 @@ category.onchange = async () => {
   });
 
   if (!all.length) {
-    // ✅ mensaje + se mantiene parroquia select para cambiar y reintentar
     extra.innerHTML = `
       <div class="alert alert-info py-2 mb-2">
-        ❌ No hay lugares en esta categoría para <b>${parroquia.value || "el cantón"}</b>.
-        <br>Prueba cambiando la parroquia o la categoría.
+        ❌ No hay lugares en esta categoría para <b>${parroquia.value || "este cantón"}</b>.<br>
+        Muy pronto estará disponible para tu zona.
       </div>
     `;
     return;
