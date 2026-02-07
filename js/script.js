@@ -1,5 +1,6 @@
 /* ================= IMPORTS ================= */
 import { db } from "./services/firebase.js";
+import { reverseGeocodeNominatim } from "./services/nominatim.js";
 
 import {
   getProvinciasConDatos,
@@ -11,7 +12,14 @@ import { findNearest } from "./app/actions.js";
 import { dataList, setUserLocation, getUserLocation } from "./app/state.js";
 
 import { map, renderMarkers, clearMarkers, clearRoute, drawRoute } from "./map/map.js";
-import { cargarLineasTransporte, clearTransportLayers, planAndShowBusStops } from "./transport/transport_controller.js";
+import {
+  cargarLineasTransporte,
+  clearTransportLayers,
+  planAndShowBusStops
+} from "./transport/transport_controller.js";
+
+// ✅ para mostrar “fuera de servicio”
+import { getLineasByTipoAll, isLineOperatingNow } from "./transport/core/transport_data.js";
 
 import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
@@ -45,12 +53,10 @@ function resetMap() {
 
 /**
  * Muestra solo un lugar en el mapa y traza la ruta desde la ubicación del usuario
- * @param {Object} place Lugar a mostrar
  */
 function showSinglePlace(place) {
   clearMarkers();
   renderMarkers([place], () => {
-    // solo dibujamos ruta "normal" si NO es bus
     if (activeMode !== "bus") {
       drawRoute(getUserLocation(), place, activeMode, document.getElementById("route-info"));
     }
@@ -70,7 +76,6 @@ async function buildRoute() {
   const infoEl = document.getElementById("route-info");
 
   if (activeMode === "bus") {
-    // ✅ ctx para filtrar líneas por cantonpasa/ciudadpasa (parroquia)
     await planAndShowBusStops(
       getUserLocation(),
       activePlace,
@@ -78,7 +83,8 @@ async function buildRoute() {
         tipo: "urbano",
         provincia: provincia.value,
         canton: canton.value,
-        ciudad: parroquia.value // (parroquia)
+        parroquia: parroquia.value,
+        now: new Date() // ✅ importante para horario (finde vs diario)
       },
       { infoEl }
     );
@@ -88,20 +94,64 @@ async function buildRoute() {
   drawRoute(getUserLocation(), activePlace, activeMode, infoEl);
 }
 
-/* ================= GEOLOCALIZACIÓN ================= */
-navigator.geolocation.getCurrentPosition(pos => {
+/* ================= GEOLOCALIZACIÓN + AUTO-SELECT ================= */
+navigator.geolocation.getCurrentPosition(async pos => {
   const loc = [pos.coords.latitude, pos.coords.longitude];
   setUserLocation(loc);
 
   L.marker(loc).addTo(map).bindPopup("📍 Tu ubicación");
-});
 
-/* ================= CARGAR PROVINCIAS ================= */
-(async () => {
-  const provincias = await getProvinciasConDatos();
-  provincia.innerHTML = `<option value="">🏞️ Seleccione provincia</option>`;
-  provincias.forEach(p => (provincia.innerHTML += `<option value="${p}">${p}</option>`));
-})();
+  try {
+    const admin = await reverseGeocodeNominatim(loc[0], loc[1]);
+
+    // 1) cargar provincias
+    const provincias = await getProvinciasConDatos();
+    provincia.innerHTML = `<option value="">🏞️ Seleccione provincia</option>`;
+    provincias.forEach(p => (provincia.innerHTML += `<option value="${p}">${p}</option>`));
+
+    // 2) set provincia
+    if (admin.provincia && provincias.includes(admin.provincia)) {
+      provincia.value = admin.provincia;
+      provincia.disabled = true;
+    } else {
+      extra.innerHTML = `❌ Aún no hay datos para tu provincia: <b>${admin.provincia || "desconocida"}</b>`;
+      return;
+    }
+
+    // 3) cantones
+    const cantones = await getCantonesConDatos(provincia.value);
+    canton.disabled = false;
+    canton.innerHTML = `<option value="">🏙️ Seleccione cantón</option>`;
+    cantones.forEach(c => (canton.innerHTML += `<option value="${c}">${c}</option>`));
+
+    if (admin.canton && cantones.includes(admin.canton)) {
+      canton.value = admin.canton;
+      canton.disabled = true;
+    } else {
+      extra.innerHTML = `❌ Aún no hay datos para tu cantón: <b>${admin.canton || "desconocido"}</b>`;
+      return;
+    }
+
+    // 4) parroquias (ahora incluye también ciudadpasa de lineas)
+    const parroquias = await getParroquiasConDatos(provincia.value, canton.value);
+    parroquia.disabled = false;
+    parroquia.classList.remove("d-none");
+    parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
+    parroquias.forEach(p => (parroquia.innerHTML += `<option value="${p}">${p}</option>`));
+
+    if (admin.parroquia && parroquias.includes(admin.parroquia)) {
+      parroquia.value = admin.parroquia;
+    }
+
+    // 5) activar categoría
+    category.value = "";
+    category.classList.remove("d-none");
+
+  } catch (e) {
+    extra.innerHTML = "❌ No se pudo detectar provincia/cantón/parroquia automáticamente.";
+    console.error(e);
+  }
+});
 
 /* ================= EVENTO PROVINCIA ================= */
 provincia.onchange = async () => {
@@ -143,10 +193,8 @@ canton.onchange = async () => {
 /* ================= EVENTO PARROQUIA ================= */
 parroquia.onchange = () => {
   resetMap();
-
   category.value = "";
   category.classList.remove("d-none");
-
   extra.innerHTML = "";
 };
 
@@ -160,33 +208,76 @@ category.onchange = async () => {
 
   /* ===== LÍNEAS DE TRANSPORTE ===== */
   if (category.value === "transporte_lineas") {
+    
     extra.innerHTML = `
+      <div id="lineas-status" class="small mb-2"></div>
+
       <select id="tipo" class="form-select mb-2">
         <option value="">🚍 Tipo de transporte</option>
         <option value="urbano">Urbano</option>
         <option value="rural">Rural</option>
       </select>
+
       <div id="lineas"></div>
     `;
 
     const tipoSel = document.getElementById("tipo");
     const lineasContainer = document.getElementById("lineas");
+    const statusEl = document.getElementById("lineas-status");
 
-    tipoSel.onchange = e => {
-      cargarLineasTransporte(e.target.value, lineasContainer, {
+    tipoSel.onchange = async e => {
+      const tipo = e.target.value;
+      lineasContainer.innerHTML = "";
+      if (statusEl) statusEl.innerHTML = "";
+
+      if (!tipo) return;
+
+      // ✅ 1) traer TODAS las líneas del área (aunque estén fuera de servicio)
+      const ctxGeo = {
+        canton: canton.value,
+        parroquia: parroquia.value
+      };
+
+      const allLineas = await getLineasByTipoAll(tipo, ctxGeo);
+      const now = new Date();
+
+      const fuera = allLineas
+        .filter(l => !isLineOperatingNow(l, now))
+        .sort((a, b) => (Number(a.orden) || 0) - (Number(b.orden) || 0));
+
+      // ✅ 2) mostrar mensaje “fuera de servicio”
+      if (statusEl) {
+        if (!allLineas.length) {
+          statusEl.innerHTML = `❌ No hay líneas registradas para esta zona.`;
+        } else if (!fuera.length) {
+          statusEl.innerHTML = `✅ Todas las líneas están operativas ahora.`;
+        } else {
+          const items = fuera
+            .map(l => `• <b>${l.codigo}</b> ${l.nombre ? `- ${l.nombre}` : ""}`)
+            .join("<br>");
+
+          statusEl.innerHTML = `
+            <div class="alert alert-warning py-2 mb-2">
+              ⛔ <b>Fuera de servicio ahora</b> (por horario):
+              <div class="mt-1">${items}</div>
+            </div>
+          `;
+        }
+      }
+
+      // ✅ 3) cargar UI normal (solo líneas operativas por horario)
+      cargarLineasTransporte(tipo, lineasContainer, {
         provincia: provincia.value,
         canton: canton.value,
-        ciudad: parroquia.value
+        parroquia: parroquia.value,
+        now
       });
     };
 
     return;
   }
 
-  /* ===== LUGARES POR CATEGORÍA =====
-     ✅ ahora incluye lugares de otras parroquias del mismo cantón,
-     pero PRIORIZA los de la parroquia seleccionada y muestra el indicativo.
-  */
+  /* ===== LUGARES POR CATEGORÍA (prioriza parroquia seleccionada) ===== */
   const snap = await getDocs(collection(db, "lugar"));
   const all = [];
 
@@ -202,11 +293,17 @@ category.onchange = async () => {
   });
 
   if (!all.length) {
-    extra.innerHTML = "❌ No hay lugares en esta categoría.";
+    // ✅ mensaje + se mantiene parroquia select para cambiar y reintentar
+    extra.innerHTML = `
+      <div class="alert alert-info py-2 mb-2">
+        ❌ No hay lugares en esta categoría para <b>${parroquia.value || "el cantón"}</b>.
+        <br>Prueba cambiando la parroquia o la categoría.
+      </div>
+    `;
     return;
   }
 
-  // ✅ ordenar: primero parroquia seleccionada, luego el resto
+  // ordenar: primero parroquia seleccionada, luego el resto
   const parroquiaSel = parroquia.value;
   all.sort((a, b) => {
     const aKey = (a.parroquia === parroquiaSel) ? 0 : 1;
@@ -217,7 +314,6 @@ category.onchange = async () => {
 
   dataList.push(...all);
 
-  /* ===== CONTROLES ===== */
   extra.innerHTML = `
     <select id="lugares" class="form-select mb-2">
       <option value="">📍 Seleccione lugar</option>

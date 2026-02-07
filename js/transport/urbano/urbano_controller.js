@@ -345,8 +345,8 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   const lineas = await getLineasByTipo("urbano", ctx);
 
   // Radios crecientes (metros)
-  const BOARD_STEPS = [25, 100, 150, 250, 350, 450, 550, 650, 800, 1000];
-  const DEST_STEPS  = [100, 150, 250, 350, 450, 550, 650, 800, 1000];
+  const BOARD_STEPS = [25, 100, 150, 250, 350, 450, 550, 650, 800, 1000,1200,1300];
+  const DEST_STEPS  = [100, 150, 250, 350, 450, 550, 650];
   const LEVELS = Math.max(BOARD_STEPS.length, DEST_STEPS.length);
 
   // pesos base (balanceados)
