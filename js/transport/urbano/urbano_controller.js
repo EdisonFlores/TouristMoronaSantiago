@@ -187,7 +187,7 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
 }
 
 /* =====================================================
-   MOSTRAR RUTA (URBANO)
+   MOSTRAR RUTA (URBANO) - modo "ver línea completa"
 ===================================================== */
 export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   clearTransportLayers();
@@ -272,7 +272,6 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   const codigo = normStr(linea.codigo);
   const esLineaCerrada = (codigo === "l1" || codigo === "l2");
   const debeCerrar = esLineaCerrada && !sentidoSel;
-
   if (debeCerrar) coordsStops.push(coordsStops[0]);
 
   const lineLayer = await drawLineRouteFollowingStreets(coordsStops, linea.color || "#000");
@@ -317,7 +316,7 @@ function resaltarYConectarParadaMasCercana(paradas, linea) {
 }
 
 /* =====================================================
-   🚌 MODO BUS: línea idónea + paradas + caminatas
+   🚌 MODO BUS: radios crecientes + comparación pulida para "circulacion"
 ===================================================== */
 async function drawWalkOSRM(layerGroup, fromLatLng, toLatLng) {
   const profile = "foot";
@@ -343,69 +342,105 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
 
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
 
-  // ✅ líneas filtradas por cantonpasa / ciudadpasa desde transport_data.js
   const lineas = await getLineasByTipo("urbano", ctx);
 
-  // ✅ umbrales duros (si están demasiado estrictos, te dirá “no hay línea”)
-  const MAX_WALK_TO_BOARD = 450;
-  const MAX_WALK_TO_DEST  = 350;
+  // Radios crecientes (metros)
+  const BOARD_STEPS = [25, 100, 150, 250, 350, 450, 550, 650, 800, 1000];
+  const DEST_STEPS  = [100, 150, 250, 350, 450, 550, 650, 800, 1000];
+  const LEVELS = Math.max(BOARD_STEPS.length, DEST_STEPS.length);
 
-  // ✅ pesos balanceados (minimax ya decide bien, pero score ayuda entre líneas)
-  // - wWalk2 un poco mayor, pero NO exagerado para no sacrificar walk1
-  const wWalk1 = 1.2;
-  const wWalk2 = 1.6;
-  const wBus   = 1.0;
-  const wStops = 25;
+  // pesos base (balanceados)
+  const BASE = { wWalk1: 1.2, wWalk2: 1.6, wBus: 1.0, wStops: 25 };
+
+  // ✅ penalización especial SOLO para “circulación”
+  const CIRC = { wWalk1: 1.2, wWalk2: 1.6, wBus: 1.25, wStops: 45 };
+
+  // ✅ anti-vuelta-completa: si recorre demasiadas paradas de la vuelta, descartar
+  const MAX_LOOP_RATIO = 0.65; // 65% de todas las paradas = demasiado
 
   let best = null;
   let bestLinea = null;
   let bestParadas = null;
-  let bestScore = Infinity;
 
-  for (const linea of lineas) {
-    const paradasAll = await getParadasByLinea(linea.codigo, ctx);
-    if (!paradasAll?.length) continue;
+  for (let level = 0; level < LEVELS; level++) {
+    const maxWalkToBoard = BOARD_STEPS[Math.min(level, BOARD_STEPS.length - 1)];
+    const maxWalkToDest  = DEST_STEPS[Math.min(level, DEST_STEPS.length - 1)];
 
-    const codigo = normStr(linea.codigo);
+    let levelBest = null;
+    let levelBestLinea = null;
+    let levelBestParadas = null;
+    let levelBestScore = Infinity;
 
-    // ✅ L1/L2: circular one-way (wrap forward)
-    const isCircularOneWay = (codigo === "l1" || codigo === "l2");
+    for (const linea of lineas) {
+      const paradasAll = await getParadasByLinea(linea.codigo, ctx);
+      if (!paradasAll?.length) continue;
 
-    const plan = planLineBoardAlightByOrder({
-      userLoc,
-      destLoc,
-      stops: paradasAll,
-      isCircularOneWay,
+      const origen = String(linea?.origen || "").toLowerCase();
+      const codigo = normStr(linea.codigo);
 
-      kBoard: 35,
-      kDest: 45,
+      const isCirculacion = (origen === "circulacion" || codigo === "l1" || codigo === "l2");
+      const isCircularOneWay = isCirculacion;
 
-      maxWalkToBoard: MAX_WALK_TO_BOARD,
-      maxWalkToDest: MAX_WALK_TO_DEST,
+      const W = isCirculacion ? CIRC : BASE;
 
-      wWalk1, wWalk2, wBus, wStops
-    });
+      const plan = planLineBoardAlightByOrder({
+        userLoc,
+        destLoc,
+        stops: paradasAll,
+        isCircularOneWay,
 
-    if (!plan) continue;
+        kBoard: 35,
+        kDest: 45,
 
-    const m = plan.metrics;
+        maxWalkToBoard,
+        maxWalkToDest,
 
-    // seguridad extra
-    if (m.walk1 > MAX_WALK_TO_BOARD) continue;
-    if (m.walk2 > MAX_WALK_TO_DEST) continue;
+        wWalk1: W.wWalk1,
+        wWalk2: W.wWalk2,
+        wBus:   W.wBus,
+        wStops: W.wStops
+      });
 
-    const score = plan.score; // ya viene ponderado del planner
+      if (!plan) continue;
 
-    // tie-break: si score parecido, preferir menor maxWalk (más balance real)
-    const better =
-      score < bestScore ||
-      (best && Math.abs(score - bestScore) < 80 && Math.max(m.walk1, m.walk2) < Math.max(best.metrics.walk1, best.metrics.walk2));
+      // ✅ filtro anti-vuelta completa para circulación
+      if (isCirculacion) {
+        const total = paradasAll.length;
+        if (total >= 10) {
+          const ratio = plan.metrics.stopsCount / total;
+          if (ratio > MAX_LOOP_RATIO) continue;
+        }
+      }
 
-    if (better) {
-      bestScore = score;
-      best = plan;
-      bestLinea = linea;
-      bestParadas = paradasAll;
+      const score = plan.score;
+
+      // ✅ en mismo nivel: preferir menor maxWalk (balance real)
+      const better =
+        score < levelBestScore ||
+        (levelBest && Math.abs(score - levelBestScore) < 80 &&
+          Math.max(plan.metrics.walk1, plan.metrics.walk2) < Math.max(levelBest.metrics.walk1, levelBest.metrics.walk2));
+
+      // ✅ extra tie-break: si ambos son circulación y score cercano, elegir MENOS paradas
+      const tieCirculationBetter =
+        levelBest &&
+        (String(levelBestLinea?.origen || "").toLowerCase() === "circulacion") &&
+        isCirculacion &&
+        Math.abs(score - levelBestScore) < 120 &&
+        plan.metrics.stopsCount < levelBest.metrics.stopsCount;
+
+      if (better || tieCirculationBetter) {
+        levelBestScore = score;
+        levelBest = plan;
+        levelBestLinea = linea;
+        levelBestParadas = paradasAll;
+      }
+    }
+
+    if (levelBest && levelBestLinea && levelBestParadas) {
+      best = levelBest;
+      bestLinea = levelBestLinea;
+      bestParadas = levelBestParadas;
+      break; // ✅ no seguimos expandiendo radios si ya hay solución
     }
   }
 
@@ -414,7 +449,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     return null;
   }
 
-  // estado popups live
+  // estado popups
   setCurrentLinea(bestLinea);
   bestParadas.sort((a, b) => (Number(a.orden) || 0) - (Number(b.orden) || 0));
   setCurrentParadas(bestParadas);
@@ -427,12 +462,12 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   setStopsLayer(layerStops);
 
   const walkLayer = L.layerGroup().addTo(map);
-  setAccessLayer(walkLayer); // ✅ se limpia con clearTransportLayers()
+  setAccessLayer(walkLayer);
 
   const boardLL = [best.boardStop.ubicacion.latitude, best.boardStop.ubicacion.longitude];
   const alightLL = [best.alightStop.ubicacion.latitude, best.alightStop.ubicacion.longitude];
 
-  // puntos del tramo real (opcional)
+  // paradas del tramo real (para “ver” la línea)
   if (Array.isArray(best.pathStops) && best.pathStops.length) {
     best.pathStops.forEach(p => {
       const { latitude, longitude } = p.ubicacion || {};
