@@ -343,18 +343,24 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
 
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
 
-  // líneas filtradas por cantonpasa / ciudadpasa desde transport_data.js
+  // ✅ líneas filtradas por cantonpasa / ciudadpasa desde transport_data.js
   const lineas = await getLineasByTipo("urbano", ctx);
 
+  // ✅ umbrales duros (si están demasiado estrictos, te dirá “no hay línea”)
   const MAX_WALK_TO_BOARD = 450;
   const MAX_WALK_TO_DEST  = 350;
 
-  // 👉 penaliza fuerte paradas para evitar “vuelta completa” (clave en L1/L2)
-  const STOPS_PENALTY = 28;
+  // ✅ pesos balanceados (minimax ya decide bien, pero score ayuda entre líneas)
+  // - wWalk2 un poco mayor, pero NO exagerado para no sacrificar walk1
+  const wWalk1 = 1.2;
+  const wWalk2 = 1.6;
+  const wBus   = 1.0;
+  const wStops = 25;
 
   let best = null;
   let bestLinea = null;
   let bestParadas = null;
+  let bestScore = Infinity;
 
   for (const linea of lineas) {
     const paradasAll = await getParadasByLinea(linea.codigo, ctx);
@@ -362,7 +368,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
 
     const codigo = normStr(linea.codigo);
 
-    // ✅ L1/L2 circulares, pero cada una es un sentido distinto (one-way)
+    // ✅ L1/L2: circular one-way (wrap forward)
     const isCircularOneWay = (codigo === "l1" || codigo === "l2");
 
     const plan = planLineBoardAlightByOrder({
@@ -370,38 +376,33 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       destLoc,
       stops: paradasAll,
       isCircularOneWay,
-      kBoard: 30,
-      kDest: 40,
+
+      kBoard: 35,
+      kDest: 45,
+
       maxWalkToBoard: MAX_WALK_TO_BOARD,
       maxWalkToDest: MAX_WALK_TO_DEST,
-      stopsPenalty: STOPS_PENALTY
+
+      wWalk1, wWalk2, wBus, wStops
     });
 
     if (!plan) continue;
 
-    // ✅ elegimos el mejor plan global por el criterio que ya viene “balanceado”
-    if (!best) {
-      best = plan;
-      bestLinea = linea;
-      bestParadas = paradasAll;
-      continue;
-    }
+    const m = plan.metrics;
 
-    // compara por maxWalk, sumWalk, stopsCount, busDist (igual que el planner)
-    const mw1 = Math.max(best.metrics.walk1, best.metrics.walk2);
-    const mw2 = Math.max(plan.metrics.walk1, plan.metrics.walk2);
+    // seguridad extra
+    if (m.walk1 > MAX_WALK_TO_BOARD) continue;
+    if (m.walk2 > MAX_WALK_TO_DEST) continue;
 
-    const sw1 = best.metrics.walk1 + best.metrics.walk2;
-    const sw2 = plan.metrics.walk1 + plan.metrics.walk2;
+    const score = plan.score; // ya viene ponderado del planner
 
+    // tie-break: si score parecido, preferir menor maxWalk (más balance real)
     const better =
-      (mw2 < mw1 - 25) ||
-      (Math.abs(mw2 - mw1) <= 25 && sw2 < sw1 - 35) ||
-      (Math.abs(mw2 - mw1) <= 25 && Math.abs(sw2 - sw1) <= 35 && plan.metrics.stopsCount < best.metrics.stopsCount) ||
-      (Math.abs(mw2 - mw1) <= 25 && Math.abs(sw2 - sw1) <= 35 && plan.metrics.stopsCount === best.metrics.stopsCount && plan.metrics.busDist < best.metrics.busDist) ||
-      (Math.abs(mw2 - mw1) <= 25 && Math.abs(sw2 - sw1) <= 35 && plan.metrics.stopsCount === best.metrics.stopsCount && Math.abs(plan.metrics.busDist - best.metrics.busDist) <= 80 && plan.metrics.walk1 < best.metrics.walk1);
+      score < bestScore ||
+      (best && Math.abs(score - bestScore) < 80 && Math.max(m.walk1, m.walk2) < Math.max(best.metrics.walk1, best.metrics.walk2));
 
     if (better) {
+      bestScore = score;
       best = plan;
       bestLinea = linea;
       bestParadas = paradasAll;
@@ -419,6 +420,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   setCurrentParadas(bestParadas);
   setCurrentStopOffsets(computeStopOffsets(bestParadas, bestLinea));
 
+  // capas
   setRouteLayer(null);
 
   const layerStops = L.layerGroup().addTo(map);
@@ -430,7 +432,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   const boardLL = [best.boardStop.ubicacion.latitude, best.boardStop.ubicacion.longitude];
   const alightLL = [best.alightStop.ubicacion.latitude, best.alightStop.ubicacion.longitude];
 
-  // dibujar puntos del tramo real
+  // puntos del tramo real (opcional)
   if (Array.isArray(best.pathStops) && best.pathStops.length) {
     best.pathStops.forEach(p => {
       const { latitude, longitude } = p.ubicacion || {};
@@ -481,6 +483,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   boardMarker.on("popupclose", stopPopupLiveUpdate);
   alightMarker.on("popupclose", stopPopupLiveUpdate);
 
+  // caminatas OSRM
   const w1 = await drawWalkOSRM(walkLayer, userLoc, boardLL);
   const w2 = await drawWalkOSRM(walkLayer, alightLL, destLoc);
 
@@ -494,8 +497,8 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       🧭 Sentido: ${best.direction}<br>
       🚶 Camina a subir: ${walk1m} m<br>
       🚍 Tramo bus (aprox): ${(best.metrics.busDist / 1000).toFixed(2)} km<br>
-      🚶 Camina al destino: ${walk2m} m<br>
-      🛑 Paradas aprox.: ${best.metrics.stopsCount}
+      🛑 Paradas aprox.: ${best.metrics.stopsCount}<br>
+      🚶 Camina al destino: ${walk2m} m
     `;
   }
 

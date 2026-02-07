@@ -13,34 +13,69 @@ function distMeters(a, b) {
   return map.distance(a, b);
 }
 
+function normSentido(s) {
+  const v = String(s || "").trim().toLowerCase();
+  if (!v) return "";
+  if (v.includes("sur") && v.includes("norte")) return "sur-norte";
+  if (v.includes("norte") && v.includes("sur")) return "norte-sur";
+  return v;
+}
+
 function normalizeStops(stops) {
   return (Array.isArray(stops) ? stops : [])
     .map(s => ({ s, ll: stopLatLng(s) }))
     .filter(x => x.ll);
 }
 
-function nearestK(stopsNorm, pointLatLng, k = 25, requireSentido = null) {
+function nearestK(stopsNorm, pointLatLng, k = 25) {
   const ranked = [];
   for (const x of stopsNorm) {
-    const s = x.s;
-    if (requireSentido && s?.sentido && String(s.sentido) !== String(requireSentido)) continue;
-    ranked.push({ stop: s, ll: x.ll, d: distMeters(pointLatLng, x.ll) });
+    ranked.push({ stop: x.s, ll: x.ll, d: distMeters(pointLatLng, x.ll) });
   }
   ranked.sort((a, b) => a.d - b.d);
   return ranked.slice(0, Math.max(1, k));
 }
 
 /**
- * Distancia aproximada siguiendo el recorrido real por orden:
- * - NO circular one-way: SOLO forward (idxA >= idxB) sin wrap.
- * - circular one-way (L1/L2): forward con wrap.
+ * Segmentos por sentido:
+ * - Recorre la lista ordenada y crea "segmentId" cada vez que cambia sentido.
+ * - Si NO hay sentido en una parada, se hereda el último (si existe).
+ */
+function buildSentidoSegments(ordered) {
+  const segIdByIdx = new Array(ordered.length).fill(0);
+  let seg = 0;
+  let last = "";
+
+  for (let i = 0; i < ordered.length; i++) {
+    const s = ordered[i];
+    const cur = normSentido(s?.sentido) || last;
+
+    if (i === 0) {
+      last = cur;
+      segIdByIdx[i] = seg;
+      continue;
+    }
+
+    if (cur && last && cur !== last) seg += 1;
+    segIdByIdx[i] = seg;
+
+    if (cur) last = cur;
+  }
+
+  return segIdByIdx; // [idx] => segId
+}
+
+/**
+ * Distancia aproximada "por orden" siguiendo recorrido real.
+ * - Normal (no circular): SOLO forward (idxA >= idxB) y dentro del mismo segmento de sentido (si aplica)
+ * - Circular one-way (L1/L2): forward con wrap
  */
 function busDistanceMetersForward(orderedStops, idxB, idxA, isCircularOneWay) {
   const n = orderedStops.length;
   if (n < 2) return Infinity;
 
   if (!isCircularOneWay) {
-    if (idxA < idxB) return Infinity; // no se puede “ir hacia atrás”
+    if (idxA < idxB) return Infinity;
     let acc = 0;
     for (let i = idxB + 1; i <= idxA; i++) {
       const prev = stopLatLng(orderedStops[i - 1]);
@@ -51,7 +86,7 @@ function busDistanceMetersForward(orderedStops, idxB, idxA, isCircularOneWay) {
     return acc;
   }
 
-  // circular one-way: avanzar con wrap
+  // circular one-way: SOLO avanzar con wrap
   let acc = 0;
   let steps = 0;
   let i = idxB;
@@ -62,8 +97,8 @@ function busDistanceMetersForward(orderedStops, idxB, idxA, isCircularOneWay) {
     if (prev && cur) acc += distMeters(prev, cur);
     i = j;
     steps++;
-    if (steps > n + 2) return Infinity; // seguridad (más de una vuelta)
-    if (acc > 200000) return Infinity; // seguridad (200km)
+    if (steps > n + 2) return Infinity;
+    if (acc > 200000) return Infinity; // 200 km => absurdo
   }
   return acc;
 }
@@ -100,51 +135,14 @@ function buildPathStops(ordered, idxB, idxA, isCircularOneWay) {
 }
 
 /**
- * Selección BALANCEADA:
- * 1) minimizar maxWalk (evita que una caminata se dispare)
- * 2) minimizar sumWalk
- * 3) minimizar stopsCount (muy importante para L1/L2 y evitar “vuelta”)
- * 4) minimizar busDist
- * 5) desempate: si lo demás es parecido => preferir walk1 menor (subida más cerca)
- */
-function isBetterCandidate(cand, best) {
-  const r1 = cand._rank;
-  const r2 = best._rank;
-
-  // tolerancias para evitar que por “ganar 1m en walk2” te mueva la subida 200m
-  const T_MAXW = 25;   // m
-  const T_SUMW = 35;   // m
-  const T_STOP = 1;    // paradas
-  const T_BUS  = 80;   // m
-
-  if (r1.maxWalk < r2.maxWalk - T_MAXW) return true;
-  if (Math.abs(r1.maxWalk - r2.maxWalk) <= T_MAXW) {
-    if (r1.sumWalk < r2.sumWalk - T_SUMW) return true;
-    if (Math.abs(r1.sumWalk - r2.sumWalk) <= T_SUMW) {
-      if (r1.stopsCount < r2.stopsCount - T_STOP) return true;
-      if (Math.abs(r1.stopsCount - r2.stopsCount) <= T_STOP) {
-        if (r1.busDist < r2.busDist - T_BUS) return true;
-
-        // ✅ FIX CLAVE: si está “empatado”, preferir subida más cerca
-        if (Math.abs(r1.busDist - r2.busDist) <= T_BUS) {
-          if (cand.metrics.walk1 < best.metrics.walk1) return true;
-        }
-      }
-    }
-  }
-
-  // fallback estricto por tieScore
-  return r1.tieScore < r2.tieScore;
-}
-
-/**
  * PLAN BALANCEADO (minimax walk) + coherencia por orden/sentido.
  *
- * - Evalúa kBoard paradas más cercanas al usuario y kDest más cercanas al destino
- * - Filtra por umbrales (maxWalkToBoard / maxWalkToDest)
- * - Respeta sentido si ambos lo tienen (si ambos traen sentido, deben coincidir)
- * - Respeta circular one-way (L1/L2): avanzar con wrap
- * - NO circular: solo forward (idxA >= idxB)
+ * Reglas:
+ * - Solo considera board en las kBoard paradas más cercanas al usuario
+ * - Solo considera alight en las kDest paradas más cercanas al destino
+ * - Si hay sentido (L3/L4/L5), board y alight deben estar en el MISMO tramo de sentido
+ * - No circular: solo forward (idxA >= idxB)
+ * - Circular one-way (L1/L2): forward wrap
  */
 export function planLineBoardAlightByOrder({
   userLoc,
@@ -158,8 +156,11 @@ export function planLineBoardAlightByOrder({
   maxWalkToBoard = 650,
   maxWalkToDest = 650,
 
-  // penalización por paradas (sube esto para L1/L2 y evitar vueltas)
-  stopsPenalty = 25
+  // pesos para score final (línea vs línea)
+  wWalk1 = 1.0,
+  wWalk2 = 1.0,
+  wBus = 1.0,
+  wStops = 15
 }) {
   if (!userLoc || !destLoc) return null;
 
@@ -170,52 +171,59 @@ export function planLineBoardAlightByOrder({
   if (ordered.length < 2) return null;
 
   const stopsNorm = normalizeStops(ordered);
-
   const boards = nearestK(stopsNorm, userLoc, kBoard);
   const dests = nearestK(stopsNorm, destLoc, kDest);
-
-  let best = null;
 
   const idxByRef = new Map();
   ordered.forEach((s, i) => idxByRef.set(s, i));
 
+  // segmentos por sentido (para L3/L4/L5)
+  const segByIdx = buildSentidoSegments(ordered);
+
+  let best = null;
+
   for (const b of boards) {
     if (b.d > maxWalkToBoard) continue;
+
+    const idxB = idxByRef.get(b.stop);
+    if (idxB == null) continue;
+
+    // Segmento del board (si hay sentido en la línea)
+    const segB = segByIdx[idxB];
 
     for (const a of dests) {
       if (a.d > maxWalkToDest) continue;
 
-      // sentido coherente si ambos lo tienen
-      if (b.stop?.sentido && a.stop?.sentido && String(b.stop.sentido) !== String(a.stop.sentido)) {
-        continue;
+      const idxA = idxByRef.get(a.stop);
+      if (idxA == null) continue;
+
+      // ✅ si NO es circular one-way, exigir mismo segmento de sentido
+      // (si la línea no tiene sentido real, todos quedarán en seg 0 y no afecta)
+      if (!isCircularOneWay) {
+        const segA = segByIdx[idxA];
+        if (segA !== segB) continue;
       }
 
-      const idxB = idxByRef.get(b.stop);
-      const idxA = idxByRef.get(a.stop);
-      if (idxB == null || idxA == null) continue;
-
+      // ✅ coherencia fuerte: forward (y wrap solo si circular)
       const busDist = busDistanceMetersForward(ordered, idxB, idxA, isCircularOneWay);
       if (!Number.isFinite(busDist) || busDist === Infinity) continue;
 
       const stopsCount = forwardStopsCount(idxB, idxA, ordered.length, isCircularOneWay);
       if (!Number.isFinite(stopsCount) || stopsCount === Infinity) continue;
 
+      // ✅ Balance minimax: primero minimiza la peor caminata
       const maxWalk = Math.max(b.d, a.d);
       const sumWalk = b.d + a.d;
 
-      const tieScore = (maxWalk * 2) + sumWalk + busDist + (stopsPenalty * stopsCount);
+      const score = (wWalk1 * b.d) + (wWalk2 * a.d) + (wBus * busDist) + (wStops * stopsCount);
 
       const candidate = {
         boardStop: b.stop,
         alightStop: a.stop,
-        direction: b.stop?.sentido ?? (isCircularOneWay ? "CIRCULAR" : "ADELANTE"),
-        metrics: {
-          walk1: b.d,
-          walk2: a.d,
-          busDist,
-          stopsCount
-        },
-        _rank: { maxWalk, sumWalk, busDist, stopsCount, tieScore },
+        direction: normSentido(b.stop?.sentido) || (isCircularOneWay ? "circular" : "adelante"),
+        metrics: { walk1: b.d, walk2: a.d, busDist, stopsCount },
+        score,
+        _rank: { maxWalk, sumWalk, busDist, stopsCount, score },
         pathStops: buildPathStops(ordered, idxB, idxA, isCircularOneWay)
       };
 
@@ -224,11 +232,23 @@ export function planLineBoardAlightByOrder({
         continue;
       }
 
-      if (isBetterCandidate(candidate, best)) best = candidate;
+      // Lexicográfico: minimax -> sumWalk -> score
+      const r1 = candidate._rank;
+      const r2 = best._rank;
+
+      const better =
+        r1.maxWalk < r2.maxWalk ||
+        (r1.maxWalk === r2.maxWalk && r1.sumWalk < r2.sumWalk) ||
+        (r1.maxWalk === r2.maxWalk && r1.sumWalk === r2.sumWalk && r1.score < r2.score) ||
+        (r1.maxWalk === r2.maxWalk && r1.sumWalk === r2.sumWalk && r1.score === r2.score && r1.busDist < r2.busDist) ||
+        (r1.maxWalk === r2.maxWalk && r1.sumWalk === r2.sumWalk && r1.score === r2.score && r1.busDist === r2.busDist && r1.stopsCount < r2.stopsCount);
+
+      if (better) best = candidate;
     }
   }
 
   if (!best) return null;
+
   delete best._rank;
   return best;
 }
