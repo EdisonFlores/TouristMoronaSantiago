@@ -7,22 +7,46 @@ export async function reverseGeocodeNominatim(lat, lon) {
 
   const res = await fetch(url, {
     headers: {
-      // Nominatim recomienda identificar tu app (mejor si pones un dominio/email real)
-      "User-Agent": "TouristMacas/1.0 (contact: your-email@example.com)"
+      // Nominatim recomienda identificar la app.
+      // Si tienes dominio/email real, reemplázalo aquí.
+      "User-Agent": "TouristMacas/1.0 (contact: admin@touristmacas.local)"
     }
   });
 
   if (!res.ok) throw new Error("Nominatim reverse failed");
-  const data = await res.json();
 
+  const data = await res.json();
   const a = data?.address || {};
 
-  // Ecuador: suele venir:
+  // Ecuador suele venir así:
   // state = provincia, county = cantón, city/town/village/suburb = parroquia/ciudad
-  const provincia = a.state || a.region || "";
-  const canton = a.county || "";
-  const parroquia =
-    a.city_district || a.suburb || a.city || a.town || a.village || a.hamlet || "";
+  const provinciaRaw = a.state || a.region || "";
+  const cantonRaw = a.county || "";
+  const parroquiaRaw =
+    a.city_district ||
+    a.suburb ||
+    a.city ||
+    a.town ||
+    a.village ||
+    a.hamlet ||
+    "";
 
-  return { provincia, canton, parroquia, raw: data };
+  return {
+    provincia: toTitleCase(provinciaRaw),
+    canton: toTitleCase(cantonRaw),
+    parroquia: toTitleCase(parroquiaRaw),
+    raw: data
+  };
+}
+
+/* =========================
+   Title Case: "morona santiago" -> "Morona Santiago"
+========================= */
+export function toTitleCase(s) {
+  const t = String(s || "").trim();
+  if (!t) return "";
+  return t
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, c => c.toUpperCase());
 }

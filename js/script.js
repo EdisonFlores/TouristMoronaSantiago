@@ -1,12 +1,8 @@
 /* ================= IMPORTS ================= */
 import { db } from "./services/firebase.js";
-import { reverseGeocodeNominatim } from "./services/nominatim.js";
+import { reverseGeocodeNominatim, toTitleCase } from "./services/nominatim.js";
 
-import {
-  getProvinciasConDatos,
-  getCantonesConDatos,
-  getParroquiasConDatos
-} from "./app/selects.js";
+import { getParroquiasConDatos } from "./app/selects.js";
 
 import { findNearest } from "./app/actions.js";
 import { dataList, setUserLocation, getUserLocation } from "./app/state.js";
@@ -18,12 +14,8 @@ import {
   planAndShowBusStops
 } from "./transport/transport_controller.js";
 
-// ✅ horario + estado operación
-import {
-  getLineasByTipoAll,
-  isLineOperatingNow,
-  formatLineScheduleHTML
-} from "./transport/core/transport_data.js";
+// (esto ya lo estabas usando)
+import { getLineasByTipoAll, isLineOperatingNow } from "./transport/core/transport_data.js";
 
 import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
@@ -38,75 +30,31 @@ const parroquia = document.getElementById("parroquia");
 const category = document.getElementById("category");
 const extra = document.getElementById("extra-controls");
 
-function ensureModal() {
-  let modal = document.getElementById("app-modal");
-  if (modal) return modal;
-
-  modal = document.createElement("div");
-  modal.id = "app-modal";
-  modal.className = "modal fade";
-  modal.tabIndex = -1;
-  modal.innerHTML = `
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title" id="app-modal-title">Aviso</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
-        </div>
-        <div class="modal-body" id="app-modal-body"></div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
-        </div>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-  return modal;
-}
-
-function showAppPopup(html, { title = "Aviso" } = {}) {
-  const modalEl = ensureModal();
-  modalEl.querySelector("#app-modal-title").textContent = title;
-
-  modalEl.querySelector("#app-modal-body").innerHTML = `
-    ${html}
-    <div class="small text-muted mt-3">
-      ⓘ Los tiempos y paradas mostrados son <b>aproximados</b> (no en tiempo real).
-    </div>
-  `;
-
-  // Bootstrap Modal (requiere bootstrap.js cargado)
-  const modal = bootstrap.Modal.getOrCreateInstance(modalEl, {
-    backdrop: true,
-    keyboard: true
-  });
-  modal.show();
-}
-
-function clearPopupIfAny() {
-  const modalEl = document.getElementById("app-modal");
-  if (!modalEl) return;
-  const inst = bootstrap.Modal.getInstance(modalEl);
-  if (inst) inst.hide();
-}
-
-
-/* ================= HELPERS ================= */
+/* ================= HELPERS UI ================= */
 function clearRouteInfo() {
   const el = document.getElementById("route-info");
   if (el) el.innerHTML = "";
 }
 
-/**
- * Reinicia el mapa: quita rutas y marcadores (incluye transporte)
- */
 function resetMap() {
   clearMarkers();
   clearRoute();
   clearTransportLayers();
   clearRouteInfo();
-  clearPopupIfAny();
   activePlace = null;
+}
+
+function showInfoBox(html, type = "info") {
+  extra.innerHTML = `
+    <div class="alert alert-${type} py-2 mb-2">
+      ${html}
+    </div>
+  `;
+}
+
+function clearExtraMessageOnly() {
+  // deja los controles normales que ya renderizas, solo limpia alerts simples
+  // (si estás usando extra para UI completa, NO lo limpies aquí)
 }
 
 /**
@@ -130,16 +78,14 @@ async function buildRoute() {
   clearRoute();
   clearTransportLayers();
   clearRouteInfo();
-  clearPopupIfAny();
 
   const infoEl = document.getElementById("route-info");
 
   if (activeMode === "bus") {
     if (infoEl) {
       infoEl.innerHTML = `
-        <div class="alert alert-info py-2 mb-2">
-          🚌 <b>Por favor espere…</b><br>
-          Estamos buscando una ruta de bus (paradas cercanas + línea idónea)…
+        <div class="alert alert-info py-2 mb-0">
+          ⏳ Por favor espere… estamos buscando una ruta en bus.
         </div>
       `;
     }
@@ -162,117 +108,73 @@ async function buildRoute() {
   drawRoute(getUserLocation(), activePlace, activeMode, infoEl);
 }
 
-/* ================= GEOLOCALIZACIÓN + AUTO-SELECT ================= */
+/* =========================================================
+   GEOLOCALIZACIÓN + AUTO-SELECT (Nominatim)
+   - Provincia/Cantón: siempre desde Nominatim (aunque no haya BD)
+   - Parroquias: SOLO desde BD (lugar) según provincia/cantón
+========================================================= */
 navigator.geolocation.getCurrentPosition(async pos => {
   const loc = [pos.coords.latitude, pos.coords.longitude];
   setUserLocation(loc);
 
-  L.marker(loc).addTo(map).bindPopup("📍 Tu ubicación");
+  // ✅ mover/centrar mapa en el usuario
+  map.setView(loc, 14);
+  L.marker(loc).addTo(map).bindPopup("📍 Tu ubicación").openPopup();
 
   try {
     const admin = await reverseGeocodeNominatim(loc[0], loc[1]);
 
-    // 1) cargar provincias
-    const provincias = await getProvinciasConDatos();
-    provincia.innerHTML = `<option value="">🏞️ Seleccione provincia</option>`;
-    provincias.forEach(p => (provincia.innerHTML += `<option value="${p}">${p}</option>`));
+    const prov = toTitleCase(admin.provincia);
+    const can = toTitleCase(admin.canton);
+    const parrDetect = toTitleCase(admin.parroquia);
 
-    // 2) set provincia
-    if (admin.provincia && provincias.includes(admin.provincia)) {
-      provincia.value = admin.provincia;
-      provincia.disabled = true;
-    } else {
-      extra.innerHTML = `
-        <div class="alert alert-info py-2">
-          ❌ Aún no hay datos para tu provincia: <b>${admin.provincia || "desconocida"}</b><br>
-          Muy pronto estará disponible para tu zona.
-        </div>
-      `;
-      return;
-    }
+    // ✅ set provincia/cantón aunque no existan en BD
+    provincia.innerHTML = `<option value="${prov}">${prov || "Desconocida"}</option>`;
+    provincia.value = prov;
+    provincia.disabled = true;
 
-    // 3) cantones
-    const cantones = await getCantonesConDatos(provincia.value);
-    canton.disabled = false;
-    canton.innerHTML = `<option value="">🏙️ Seleccione cantón</option>`;
-    cantones.forEach(c => (canton.innerHTML += `<option value="${c}">${c}</option>`));
+    canton.innerHTML = `<option value="${can}">${can || "Desconocido"}</option>`;
+    canton.value = can;
+    canton.disabled = true;
 
-    if (admin.canton && cantones.includes(admin.canton)) {
-      canton.value = admin.canton;
-      canton.disabled = true;
-    } else {
-      extra.innerHTML = `
-        <div class="alert alert-info py-2">
-          ❌ Aún no hay datos para tu cantón: <b>${admin.canton || "desconocido"}</b><br>
-          Muy pronto estará disponible para tu zona.
-        </div>
-      `;
-      return;
-    }
+    // ✅ parroquias SOLO desde BD
+    const parroquiasBD = await getParroquiasConDatos(prov, can);
 
-    // 4) parroquias (✅ SOLO las que tienen lugares en BD)
-    const parroquias = await getParroquiasConDatos(provincia.value, canton.value);
-
-    parroquia.disabled = false;
     parroquia.classList.remove("d-none");
+    parroquia.disabled = false;
     parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
-    parroquias.forEach(p => (parroquia.innerHTML += `<option value="${p}">${p}</option>`));
 
-    if (admin.parroquia && parroquias.includes(admin.parroquia)) {
-      parroquia.value = admin.parroquia;
+    if (!parroquiasBD.length) {
+      // no hay datos todavía para ese cantón/provincia
+      parroquia.disabled = true;
+      category.classList.add("d-none");
+      showInfoBox(
+        `❌ Aún no hay datos en la BD para <b>${prov || "Provincia"}</b>, <b>${can || "Cantón"}</b>.<br>
+         Muy pronto estará disponible para tu zona.`,
+        "warning"
+      );
+      return;
     }
 
-    // 5) activar categoría
-    category.value = "";
+    parroquiasBD.forEach(p => {
+      parroquia.innerHTML += `<option value="${p}">${p}</option>`;
+    });
+
+    // ✅ si la parroquia detectada existe en BD, la seleccionamos
+    if (parrDetect && parroquiasBD.includes(parrDetect)) {
+      parroquia.value = parrDetect;
+    }
+
+    // habilitar categoría
     category.classList.remove("d-none");
+    category.value = "";
+    extra.innerHTML = "";
 
   } catch (e) {
-    extra.innerHTML = `
-      <div class="alert alert-warning py-2">
-        ❌ No se pudo detectar provincia/cantón/parroquia automáticamente.
-      </div>
-    `;
     console.error(e);
+    showInfoBox("❌ No se pudo detectar provincia/cantón/parroquia automáticamente.", "danger");
   }
 });
-
-/* ================= EVENTO PROVINCIA ================= */
-provincia.onchange = async () => {
-  resetMap();
-
-  canton.disabled = false;
-  canton.innerHTML = `<option value="">🏙️ Seleccione cantón</option>`;
-
-  parroquia.classList.add("d-none");
-  parroquia.disabled = true;
-  parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
-
-  category.value = "";
-  category.classList.add("d-none");
-
-  extra.innerHTML = "";
-
-  const cantones = await getCantonesConDatos(provincia.value);
-  cantones.forEach(c => (canton.innerHTML += `<option value="${c}">${c}</option>`));
-};
-
-/* ================= EVENTO CANTÓN ================= */
-canton.onchange = async () => {
-  resetMap();
-
-  parroquia.disabled = false;
-  parroquia.classList.remove("d-none");
-  parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
-
-  category.value = "";
-  category.classList.add("d-none");
-
-  extra.innerHTML = "";
-
-  // ✅ SOLO parroquias con lugares
-  const parroquias = await getParroquiasConDatos(provincia.value, canton.value);
-  parroquias.forEach(p => (parroquia.innerHTML += `<option value="${p}">${p}</option>`));
-};
 
 /* ================= EVENTO PARROQUIA ================= */
 parroquia.onchange = () => {
@@ -293,6 +195,8 @@ category.onchange = async () => {
   /* ===== LÍNEAS DE TRANSPORTE ===== */
   if (category.value === "transporte_lineas") {
     extra.innerHTML = `
+      <div id="lineas-status" class="small mb-2"></div>
+
       <select id="tipo" class="form-select mb-2">
         <option value="">🚍 Tipo de transporte</option>
         <option value="urbano">Urbano</option>
@@ -304,123 +208,111 @@ category.onchange = async () => {
 
     const tipoSel = document.getElementById("tipo");
     const lineasContainer = document.getElementById("lineas");
+    const statusEl = document.getElementById("lineas-status");
 
-    // cache local para mostrar popup al elegir línea
-    let lineMap = new Map();
-    let tipoActual = "";
-
-    // Delegación: solo en esta categoría
-    lineasContainer.addEventListener("change", (ev) => {
-      const t = ev.target;
-
-      // popup SOLO cuando se selecciona una línea
-      if (t && t.id === "select-linea") {
-        const codigo = t.value;
-        if (!codigo) return;
-
-        const l = lineMap.get(codigo);
-        if (!l) return;
-
-        const now = new Date();
-        const op = isLineOperatingNow(l, now);
-
-        const nowTxt = now.toLocaleTimeString("es-EC", { hour: "2-digit", minute: "2-digit" });
-
-        if (!op) {
-          showAppPopup(
-            `
-              ⛔ <b>${l.codigo}</b> ${l.nombre ? `- ${l.nombre}` : ""}<br>
-              <div class="mt-2">
-                <b>Estado:</b> Fuera de servicio ahora<br>
-                🕒 <b>Hora actual:</b> ${nowTxt}
-              </div>
-              <hr class="my-2">
-              ${formatLineScheduleHTML(l)}
-            `,
-            { title: "Línea fuera de servicio" }
-          );
-        } else {
-          showAppPopup(
-            `
-              ✅ <b>${l.codigo}</b> ${l.nombre ? `- ${l.nombre}` : ""}<br>
-              <div class="mt-2">
-                <b>Estado:</b> Operativa ahora<br>
-                🕒 <b>Hora actual:</b> ${nowTxt}
-              </div>
-              <hr class="my-2">
-              ${formatLineScheduleHTML(l)}
-            `,
-            { title: "Horario y frecuencia" }
-          );
-        }
-      }
-    });
-
-    tipoSel.onchange = async (e) => {
+    tipoSel.onchange = async e => {
       const tipo = e.target.value;
-      tipoActual = tipo;
       lineasContainer.innerHTML = "";
-      lineMap = new Map();
-      clearPopupIfAny();
+      if (statusEl) statusEl.innerHTML = "";
 
-      if (!tipoActual) return;
+      if (!tipo) return;
 
-      // ✅ 1) traer líneas del área para poder mostrar popup por código
       const ctxGeo = {
         canton: canton.value,
         parroquia: parroquia.value
       };
 
-      const allLineas = await getLineasByTipoAll(tipoActual, ctxGeo);
-      allLineas.forEach(l => lineMap.set(l.codigo, l));
+      const allLineas = await getLineasByTipoAll(tipo, ctxGeo);
+      const now = new Date();
 
-      // ✅ 2) UI normal (tu módulo urbano/rural se encarga)
-      cargarLineasTransporte(tipoActual, lineasContainer, {
+      const fuera = allLineas
+        .filter(l => !isLineOperatingNow(l, now))
+        .sort((a, b) => (Number(a.orden) || 0) - (Number(b.orden) || 0));
+
+      // ✅ esto solo informa, NO molesta con popups aquí.
+      // (El popup “fuera de servicio” lo harás cuando el usuario elija la línea,
+      // eso lo controlas en tu UI de urbano_controller/rural_controller)
+      if (statusEl) {
+        statusEl.innerHTML = `
+          <div class="alert alert-info py-2 mb-2">
+            ℹ️ Las frecuencias y horarios mostrados son <b>aproximados</b>.
+          </div>
+        `;
+      }
+
+      // UI normal (tu controlador puede filtrar/mostrar según horario)
+      cargarLineasTransporte(tipo, lineasContainer, {
         provincia: provincia.value,
         canton: canton.value,
         parroquia: parroquia.value,
-        now: new Date()
+        now
       });
     };
 
     return;
   }
 
-  /* ===== LUGARES POR CATEGORÍA (prioriza parroquia seleccionada) ===== */
-  const snap = await getDocs(collection(db, "lugar"));
-  const all = [];
+  /* ===== LUGARES POR CATEGORÍA (solo parroquia seleccionada) ===== */
+  /* ===== LUGARES POR CATEGORÍA
+   ✅ Trae lugares de TODO el cantón (todas las parroquias)
+   ✅ Prioriza los de la parroquia seleccionada
+===== */
+const snap = await getDocs(collection(db, "lugar"));
+const all = [];
 
-  snap.forEach(d => {
-    const l = d.data();
-    if (!l?.activo) return;
+const provSel = provincia.value;
+const cantonSel = canton.value;      // en "lugar" el cantón está en ciudad
+const catSel = String(category.value || "").toLowerCase();
+const parroquiaSel = parroquia.value; // puede estar vacío si el usuario no elige
 
-    if (l.provincia !== provincia.value) return;
-    if (l.ciudad !== canton.value) return; // ciudad = cantón en "lugar"
-    if (l.subcategoria?.toLowerCase() !== category.value.toLowerCase()) return;
+snap.forEach(d => {
+  const l = d.data();
+  if (!l?.activo) return;
 
-    all.push(l);
-  });
+  // mismo territorio base
+  if (l.provincia !== provSel) return;
+  if (l.ciudad !== cantonSel) return;
 
-  if (!all.length) {
-    extra.innerHTML = `
-      <div class="alert alert-info py-2 mb-2">
-        ❌ No hay lugares en esta categoría para <b>${parroquia.value || "este cantón"}</b>.<br>
-        Muy pronto estará disponible para tu zona.
-      </div>
-    `;
-    return;
+  // misma subcategoria
+  if (String(l.subcategoria || "").toLowerCase() !== catSel) return;
+
+  all.push(l);
+});
+
+if (!all.length) {
+  extra.innerHTML = `
+    <div class="alert alert-info py-2 mb-2">
+      ❌ No hay lugares en esta categoría .
+      <br>Muy pronto estará disponible para tu zona.
+    </div>
+  `;
+  return;
+}
+
+// ✅ ordenar: 1) parroquia seleccionada primero, 2) el resto, 3) por nombre
+all.sort((a, b) => {
+  const aP = String(a.parroquia,a.ciudad || "");
+  const bP = String(b.parroquia || "");
+
+  // si no hay parroquia seleccionada, solo orden alfabético
+  if (!parroquiaSel) {
+    return String(a.nombre || "").localeCompare(String(b.nombre || ""));
   }
 
-  // ordenar: primero parroquia seleccionada, luego el resto
-  const parroquiaSel = parroquia.value;
-  all.sort((a, b) => {
-    const aKey = (a.parroquia === parroquiaSel) ? 0 : 1;
-    const bKey = (b.parroquia === parroquiaSel) ? 0 : 1;
-    if (aKey !== bKey) return aKey - bKey;
-    return String(a.nombre || "").localeCompare(String(b.nombre || ""));
-  });
+  const aKey = (aP === parroquiaSel) ? 0 : 1;
+  const bKey = (bP === parroquiaSel) ? 0 : 1;
 
-  dataList.push(...all);
+  if (aKey !== bKey) return aKey - bKey;
+
+  // dentro del mismo grupo, orden alfabético por parroquia y nombre
+  const pCmp = aP.localeCompare(bP);
+  if (pCmp !== 0) return pCmp;
+
+  return String(a.nombre || "").localeCompare(String(b.nombre || ""));
+});
+
+dataList.push(...all);
+
 
   extra.innerHTML = `
     <select id="lugares" class="form-select mb-2">
@@ -445,8 +337,7 @@ category.onchange = async () => {
   const sel = document.getElementById("lugares");
 
   dataList.forEach((l, i) => {
-    const ptxt = l.parroquia ? ` (Parroquia: ${l.parroquia})` : "";
-    sel.innerHTML += `<option value="${i}">${l.nombre || "Lugar"}${ptxt}</option>`;
+    sel.innerHTML += `<option value="${i}">${l.nombre || "Lugar"}</option>`;
   });
 
   renderMarkers(dataList, place => {

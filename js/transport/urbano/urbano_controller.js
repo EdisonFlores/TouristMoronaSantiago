@@ -8,7 +8,10 @@ import {
   getParadasByLinea,
   normStr,
   titleCase,
-  normCobertura
+  normCobertura,
+  // ✅ NUEVO: horario + formato
+  isLineOperatingNow,
+  formatLineScheduleHTML
 } from "../core/transport_data.js";
 
 import {
@@ -38,6 +41,97 @@ import {
 } from "../core/transport_state.js";
 
 import { planLineBoardAlightByOrder } from "../core/transport_bus_planner.js";
+
+/* =====================================================
+   MODAL (Bootstrap) - solo para "Líneas de transporte"
+===================================================== */
+function ensureTransportModal() {
+  let el = document.getElementById("tm-linea-modal");
+  if (el) return el;
+
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `
+    <div class="modal fade" id="tm-linea-modal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+
+          <div class="modal-header">
+            <h5 class="modal-title" id="tm-linea-modal-title">Información de la línea</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+          </div>
+
+          <div class="modal-body">
+            <div id="tm-linea-modal-body" class="small"></div>
+
+            <div class="alert alert-info py-2 mt-3 mb-0">
+              ℹ️ <b>Nota:</b> horarios, frecuencias, tiempos y “próximo bus” son <b>aproximados</b>.
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(wrap.firstElementChild);
+  return document.getElementById("tm-linea-modal");
+}
+
+function hhmmNow(date = new Date()) {
+  const h = String(date.getHours()).padStart(2, "0");
+  const m = String(date.getMinutes()).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+function showLineaModal(linea, now = new Date()) {
+  const modalEl = ensureTransportModal();
+  const titleEl = modalEl.querySelector("#tm-linea-modal-title");
+  const bodyEl = modalEl.querySelector("#tm-linea-modal-body");
+
+  const code = linea?.codigo || "";
+  const name = linea?.nombre ? ` - ${linea.nombre}` : "";
+
+  const isOp = isLineOperatingNow(linea, now);
+
+  titleEl.textContent = `🚌 ${code}${name}`;
+
+  const scheduleHTML = formatLineScheduleHTML(linea);
+
+  if (!isOp) {
+    bodyEl.innerHTML = `
+      <div class="alert alert-warning py-2 mb-2">
+        ⛔ <b>Fuera de servicio ahora</b><br>
+        Hora actual: <b>${hhmmNow(now)}</b>
+      </div>
+
+      <div class="p-2 border rounded">
+        ${scheduleHTML}
+      </div>
+    `;
+  } else {
+    bodyEl.innerHTML = `
+      <div class="alert alert-success py-2 mb-2">
+        ✅ <b>Operativa ahora</b><br>
+        Hora actual: <b>${hhmmNow(now)}</b>
+      </div>
+
+      <div class="p-2 border rounded">
+        ${scheduleHTML}
+      </div>
+    `;
+  }
+
+  // Bootstrap 5 modal
+  // (bootstrap.bundle ya está en tu HTML, así que window.bootstrap existe)
+  const modal = window.bootstrap?.Modal?.getOrCreateInstance(modalEl, {
+    backdrop: true,
+    keyboard: true
+  });
+  modal?.show();
+}
 
 /* =====================================================
    LIMPIEZA
@@ -87,6 +181,13 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
     const target = ev.target;
     if (!target || !target.id) return;
 
+    // ✅ usar now del ctx si existe (para finde vs diario)
+    const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
+
+    /* =====================
+       SELECCIÓN DE LÍNEA
+       ✅ aquí SÍ mostramos modal
+    ===================== */
     if (target.id === "select-linea") {
       const codigo = target.value;
       const linea = lineas.find(l => l.codigo === codigo);
@@ -100,6 +201,9 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
       currentCobertura = "";
 
       if (!linea) return;
+
+      // ✅ POPUP SOLO AQUÍ (cuando eliges una línea)
+      showLineaModal(linea, now);
 
       const needsSentido = ["l3", "l4", "l5"].includes(normStr(linea.codigo));
       if (!needsSentido) {
@@ -130,6 +234,10 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
 
     const isL5 = normStr(currentLineaSel.codigo) === "l5";
 
+    /* =====================
+       SELECCIÓN DE SENTIDO
+       ❌ NO mostramos modal aquí
+    ===================== */
     if (target.id === "select-sentido") {
       const sentidoSel = titleCase(normStr(target.value));
 
@@ -166,6 +274,10 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
       return;
     }
 
+    /* =====================
+       SELECCIÓN DE COBERTURA
+       ❌ NO mostramos modal aquí
+    ===================== */
     if (target.id === "select-cobertura") {
       if (!isL5) return;
 
@@ -316,7 +428,7 @@ function resaltarYConectarParadaMasCercana(paradas, linea) {
 }
 
 /* =====================================================
-   🚌 MODO BUS: radios crecientes + comparación pulida para "circulacion"
+   🚌 MODO BUS: (tu código se queda igual)
 ===================================================== */
 async function drawWalkOSRM(layerGroup, fromLatLng, toLatLng) {
   const profile = "foot";
@@ -535,6 +647,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       🛑 Paradas aprox.: ${best.metrics.stopsCount}<br>
       🚶 Camina al destino: ${walk2m} m
     `;
+    
   }
 
   map.fitBounds(L.latLngBounds([userLoc, destLoc, boardLL, alightLL]).pad(0.2));
