@@ -9,8 +9,9 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 
 export const markersLayer = L.layerGroup().addTo(map);
 
-let routeLine = null;       // Línea de la ruta actual
-let markerSelected = null;  // Marcador del lugar seleccionado
+let routeLine = null;            // ruta simple
+let routeLines = [];             // rutas extra (multi / admin)
+let markerSelected = null;
 
 /* ================= LIMPIEZA ================= */
 export function clearMarkers() {
@@ -21,6 +22,10 @@ export function clearRoute() {
   if (routeLine) {
     map.removeLayer(routeLine);
     routeLine = null;
+  }
+  if (routeLines.length) {
+    routeLines.forEach(l => map.removeLayer(l));
+    routeLines = [];
   }
   if (markerSelected) {
     map.removeLayer(markerSelected);
@@ -48,16 +53,14 @@ export function renderMarkers(list, onSelect) {
   });
 }
 
-/* ================= RUTAS ================= */
+/* ================= RUTAS (1 tramo - tu función original) ================= */
 export async function drawRoute(userLoc, place, mode, infoBox) {
   if (!userLoc || !place?.ubicacion) return;
 
-  // limpiar ruta y marcador previo
   clearRoute();
 
   const { latitude, longitude } = place.ubicacion;
 
-  // marcador del lugar seleccionado
   markerSelected = L.marker([latitude, longitude])
     .addTo(map)
     .bindPopup(
@@ -65,14 +68,13 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
     )
     .openPopup();
 
-  // perfil para OSRM
   const profile = {
     walking: "foot",
     driving: "car",
     cycling: "bike",
     bicycle: "bike",
     motorcycle: "car",
-    bus: "car" // temporal, se puede reemplazar si hay rutas de bus
+    bus: "car"
   }[mode] || "foot";
 
   const url =
@@ -86,7 +88,6 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
 
   const route = data.routes[0];
 
-  // dibujar línea de la ruta
   routeLine = L.polyline(
     route.geometry.coordinates.map(c => [c[1], c[0]]),
     { color: "#1e88e5", weight: 5 }
@@ -94,7 +95,6 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
 
   map.fitBounds(routeLine.getBounds());
 
-  // calcular tiempo y distancia
   const distanciaKm = route.distance / 1000;
 
   const velocidadPorModo = {
@@ -105,16 +105,13 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
     driving: 30
   };
 
-  // si bus o no hay velocidad definida, usamos OSRM (segundos)
   const usaTiempoOsrm = mode === "bus" || !velocidadPorModo[mode];
 
   const tiempoSeg = usaTiempoOsrm
     ? Math.round(route.duration)
     : Math.round((distanciaKm / velocidadPorModo[mode]) * 3600);
 
-  // ✅ ahora muestra horas/min si pasa de 59 min
   const tiempoTexto = formatDurationFromSeconds(tiempoSeg);
-
   const distanciaKmTexto = distanciaKm.toFixed(2);
 
   if (infoBox) {
@@ -124,4 +121,97 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
       📏 ${distanciaKmTexto} km
     `;
   }
+}
+
+/* ================= NUEVO: utilidades para rutas entre puntos ================= */
+function modeToProfile(mode) {
+  return ({
+    walking: "foot",
+    bicycle: "bike",
+    driving: "car"
+  }[mode] || "car");
+}
+
+async function fetchOSRMRoute(from, to, profile) {
+  const url =
+    `https://router.project-osrm.org/route/v1/${profile}/` +
+    `${from[1]},${from[0]};${to[1]},${to[0]}?overview=full&geometries=geojson`;
+
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!data.routes?.length) return null;
+  return data.routes[0];
+}
+
+/**
+ * Dibuja un tramo sin borrar capas de transporte.
+ * Útil para: Terminal -> Provincia/Cantón cuando el primer tramo fue BUS.
+ */
+export async function drawRouteBetweenPoints({
+  from,
+  to,
+  mode = "driving",
+  color = "#0d6efd",
+  dashed = false,
+  weight = 5
+}) {
+  if (!from || !to) return null;
+
+  const r = await fetchOSRMRoute(from, to, modeToProfile(mode));
+  if (!r) return null;
+
+  const coords = r.geometry.coordinates.map(c => [c[1], c[0]]);
+  const line = L.polyline(coords, {
+    color,
+    weight,
+    dashArray: dashed ? "8 10" : null
+  }).addTo(map);
+
+  routeLines.push(line);
+  return { route: r, line };
+}
+
+/**
+ * Dibuja 2 tramos OSRM (para modos: walking/bicycle/driving).
+ * (Para bus, el tramo 1 lo hace tu planner; aquí solo usarás drawRouteBetweenPoints para tramo 2)
+ */
+export async function drawTwoLegOSRM({
+  userLoc,
+  terminalLoc,
+  targetLoc,
+  mode = "driving",
+  color1 = "#6c757d", // usuario->terminal
+  color2 = "#0d6efd", // terminal->destino
+  infoBox = null,
+  title = "Ruta vía Terminal"
+}) {
+  if (!userLoc || !terminalLoc || !targetLoc) return null;
+
+  clearRoute(); // aquí sí limpiamos todo lo “no-transporte”
+
+  const r1 = await fetchOSRMRoute(userLoc, terminalLoc, modeToProfile(mode));
+  const r2 = await fetchOSRMRoute(terminalLoc, targetLoc, modeToProfile(mode));
+  if (!r1 || !r2) return null;
+
+  const coords1 = r1.geometry.coordinates.map(c => [c[1], c[0]]);
+  const coords2 = r2.geometry.coordinates.map(c => [c[1], c[0]]);
+
+  const line1 = L.polyline(coords1, { color: color1, weight: 5, dashArray: "8 10" }).addTo(map);
+  const line2 = L.polyline(coords2, { color: color2, weight: 5 }).addTo(map);
+
+  routeLines = [line1, line2];
+
+  const totalDist = (Number(r1.distance) || 0) + (Number(r2.distance) || 0);
+  const totalDur = (Number(r1.duration) || 0) + (Number(r2.duration) || 0);
+
+  if (infoBox) {
+    infoBox.innerHTML = `
+      <b>${title}</b><br>
+      ⏱ ${formatDurationFromSeconds(Math.round(totalDur))}<br>
+      📏 ${(totalDist / 1000).toFixed(2)} km
+    `;
+  }
+
+  map.fitBounds(L.latLngBounds([userLoc, terminalLoc, targetLoc]).pad(0.2));
+  return { r1, r2, line1, line2 };
 }

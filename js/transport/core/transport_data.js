@@ -1,6 +1,5 @@
 // js/transport/core/transport_data.js
-import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
-import { db } from "../../services/firebase.js";
+import { getCollectionCache } from "../../app/cache_db.js";
 
 /* ==========================
    NORMALIZACIÓN FUERTE
@@ -47,7 +46,7 @@ function toNormArrayKey(v) {
    HELPERS HORARIO
 ========================== */
 function isWeekend(now = new Date()) {
-  const d = now.getDay(); // 0 dom ... 6 sab
+  const d = now.getDay();
   return d === 0 || d === 6;
 }
 
@@ -75,13 +74,6 @@ function parseRangeES(s) {
   return { start: a, end: b };
 }
 
-/**
- * ¿Está operativa ahora?
- * - Semana: horario_inicio / horario_fin
- * - Finde:
- *   - si trae horariofinsem (array de rangos "HH:MM a HH:MM"), valida por rangos
- *   - si no trae, usa horario_inicio/horario_fin como fallback
- */
 export function isLineOperatingNow(linea, now = new Date()) {
   if (!linea?.activo) return false;
 
@@ -92,20 +84,16 @@ export function isLineOperatingNow(linea, now = new Date()) {
     for (const r of linea.horariofinsem) {
       const rr = parseRangeES(r);
       if (!rr) continue;
-      // rango normal (no cruza medianoche)
       if (rr.start <= cur && cur <= rr.end) return true;
     }
     return false;
   }
 
-  // fallback horario normal
   const ini = parseHHMM(linea.horario_inicio);
   const fin = parseHHMM(linea.horario_fin);
-  if (ini == null || fin == null) return true; // si no hay datos, no bloqueamos
+  if (ini == null || fin == null) return true;
 
   if (ini <= fin) return cur >= ini && cur <= fin;
-
-  // si cruzara medianoche (raro en tus datos, pero por seguridad)
   return cur >= ini || cur <= fin;
 }
 
@@ -148,62 +136,51 @@ export function formatLineScheduleHTML(linea) {
 }
 
 /* ==========================
-   LÍNEAS (filtradas) para el app
-   ctx: { canton, parroquia }
+   LÍNEAS (cacheadas)
 ========================== */
 export async function getLineasByTipo(tipo, ctx = {}) {
   const t = normStr(tipo);
-  const snap = await getDocs(collection(db, "lineas_transporte"));
+  const all = await getCollectionCache("lineas_transporte");
   const out = [];
 
   const cantonSel = normKey(ctx?.canton);
-  const parroquiaSel = normKey(ctx?.parroquia); // en tu BD: ciudadpasa = parroquias
+  const parroquiaSel = normKey(ctx?.parroquia);
 
-  snap.forEach(d => {
-    const l = d.data();
+  all.forEach(l => {
     if (!l?.activo) return;
     if (normStr(l.tipo) !== t) return;
 
-    // filtro cantón
     if (cantonSel) {
       const cantones = toNormArrayKey(l.cantonpasa);
       const ok = cantones.includes(cantonSel) || normKey(l.canton) === cantonSel;
       if (!ok) return;
     }
 
-    // filtro parroquia (ciudadpasa)
     if (parroquiaSel) {
       const parroquias = toNormArrayKey(l.ciudadpasa);
       const ok = parroquias.includes(parroquiaSel) || normKey(l.ciudad) === parroquiaSel;
       if (!ok) return;
     }
 
-    out.push({ id: d.id, ...l });
+    out.push(l);
   });
 
   return out;
 }
 
-/**
- * ✅ Necesaria para la UI de “líneas”: trae TODAS (aunque estén fuera de servicio),
- * pero sí respeta canton/pasa + parroquia/pasa (zona).
- */
 export async function getLineasByTipoAll(tipo, ctx = {}) {
   return getLineasByTipo(tipo, ctx);
 }
 
 /* ==========================
-   PARADAS
+   PARADAS (cacheadas)
 ========================== */
 export async function getParadasByLinea(codigoLinea, ctx = {}) {
-  const snap = await getDocs(collection(db, "paradas_transporte"));
+  const all = await getCollectionCache("paradas_transporte");
   const paradas = [];
 
-  snap.forEach(d => {
-    const p = d.data();
-    if (p?.activo && p.codigo_linea === codigoLinea) {
-      paradas.push(p);
-    }
+  all.forEach(p => {
+    if (p?.activo && p.codigo_linea === codigoLinea) paradas.push(p);
   });
 
   paradas.sort((a, b) => (Number(a.orden) || 0) - (Number(b.orden) || 0));
