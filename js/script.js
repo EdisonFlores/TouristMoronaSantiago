@@ -29,7 +29,11 @@ import {
 
 import { getLineasByTipoAll, isLineOperatingNow } from "./transport/core/transport_data.js";
 
-import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+// ✅ Cache en memoria (tu módulo)
+import { getCollectionCache } from "./app/cache_db.js";
+
+// ✅ (Opcional) si aún los usas en otros lados, puedes quitarlos aquí.
+// import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
 /* ================= ESTADO GLOBAL ================= */
 let activePlace = null;
@@ -102,22 +106,22 @@ function showModal(title, html) {
 
 /* ================= TERMINAL DEL CANTÓN ACTUAL ================= */
 async function getUserCantonTerminal() {
-  const snap = await getDocs(collection(db, "lugar"));
+  // ✅ Antes: getDocs(collection(db,"lugar")) => MUCHAS lecturas
+  // ✅ Ahora: 1 sola lectura por sesión
+  const lugares = await getCollectionCache("lugar");
+
   const provSel = provincia.value;
   const cantonSel = canton.value;
 
-  let terminal = null;
-
-  snap.forEach(d => {
-    const l = d.data();
-    if (!l?.activo) return;
-    if (l.provincia !== provSel) return;
-    if (l.ciudad !== cantonSel) return; // ciudad = cantón
-    if (String(l.subcategoria || "").toLowerCase() !== "terminal") return;
-    terminal = l;
-  });
-
-  return terminal;
+  return (
+    lugares.find(l => {
+      if (!l?.activo) return false;
+      if (l.provincia !== provSel) return false;
+      if (l.ciudad !== cantonSel) return false; // ciudad = cantón
+      if (String(l.subcategoria || "").toLowerCase() !== "terminal") return false;
+      return true;
+    }) || null
+  );
 }
 
 /* ================= MAPA: LUGAR ÚNICO ================= */
@@ -219,10 +223,10 @@ navigator.geolocation.getCurrentPosition(async pos => {
     category.value = "";
     category.classList.remove("d-none");
 
-    // código de provincia del usuario (para filtrar cantones destino)
-    const provSnap = await getDocs(collection(db, "provincias"));
-    provSnap.forEach(d => {
-      const p = d.data();
+    // ✅ Antes: getDocs(collection(db,"provincias"))
+    // ✅ Ahora: cache
+    const provs = await getCollectionCache("provincias");
+    provs.forEach(p => {
       const nombre = titleCaseWords(p.Nombre || p.nombre);
       if (nombre === titleCaseWords(userProvinciaName)) {
         userProvinciaCode = String(p.codigo || "").trim();
@@ -286,248 +290,233 @@ category.onchange = async () => {
 
   if (!category.value) return;
 
-/* =========================================================
-   ✅ IR A PROVINCIA / IR A CANTÓN (vía Terminal) con mismos modos
-   (igual que categorías normales, excepto transporte_lineas)
-========================================================= */
-if (category.value === "ir_provincia" || category.value === "ir_canton") {
-  extra.innerHTML = `
-    <div class="mb-2">
-      <label class="form-label small mb-1">${
-        category.value === "ir_provincia" ? "Provincia destino" : "Cantón destino"
-      }</label>
-      <select id="dest_admin" class="form-select">
-        <option value="">Seleccione...</option>
-      </select>
-    </div>
-
-    <div class="mb-2">
-      <label class="form-label small mb-1">Modo de traslado</label>
-      <div class="btn-group w-100">
-        <button class="btn btn-outline-primary active" data-admin-mode="driving">🚗</button>
-        <button class="btn btn-outline-primary" data-admin-mode="walking">🚶</button>
-        <button class="btn btn-outline-primary" data-admin-mode="bicycle">🚴</button>
-        <button class="btn btn-outline-primary" data-admin-mode="motorcycle">🏍️</button>
-        <button class="btn btn-outline-primary" data-admin-mode="bus">🚌</button>
+  /* =========================================================
+     ✅ IR A PROVINCIA / IR A CANTÓN (vía Terminal) con mismos modos
+  ========================================================= */
+  if (category.value === "ir_provincia" || category.value === "ir_canton") {
+    extra.innerHTML = `
+      <div class="mb-2">
+        <label class="form-label small mb-1">${
+          category.value === "ir_provincia" ? "Provincia destino" : "Cantón destino"
+        }</label>
+        <select id="dest_admin" class="form-select">
+          <option value="">Seleccione...</option>
+        </select>
       </div>
-    </div>
 
-    <div id="admin-route-info" class="small"></div>
-  `;
+      <div class="mb-2">
+        <label class="form-label small mb-1">Modo de traslado</label>
+        <div class="btn-group w-100">
+          <button class="btn btn-outline-primary active" data-admin-mode="driving">🚗</button>
+          <button class="btn btn-outline-primary" data-admin-mode="walking">🚶</button>
+          <button class="btn btn-outline-primary" data-admin-mode="bicycle">🚴</button>
+          <button class="btn btn-outline-primary" data-admin-mode="motorcycle">🏍️</button>
+          <button class="btn btn-outline-primary" data-admin-mode="bus">🚌</button>
+        </div>
+      </div>
 
-  const destSel = document.getElementById("dest_admin");
-  const infoEl = document.getElementById("admin-route-info");
+      <div id="admin-route-info" class="small"></div>
+    `;
 
-  let adminMode = "driving";
-  let targetLL = null; // latlng destino
+    const destSel = document.getElementById("dest_admin");
+    const infoEl = document.getElementById("admin-route-info");
 
-  // ====== cargar destinos ======
-  if (category.value === "ir_provincia") {
-    const provSnap = await getDocs(collection(db, "provincias"));
-    const provs = [];
+    let adminMode = "driving";
+    let targetLL = null; // latlng destino
 
-    provSnap.forEach(d => {
-      const p = d.data();
-      const n = titleCaseWords(p.Nombre || p.nombre);
-      if (!n) return;
+    // ✅ Índices en memoria para no reconsultar al cambiar destino
+    const provIndex = new Map(); // nombre -> [lat,lng]
+    const cantIndex = new Map(); // nombre -> [lat,lng]
 
-      // excluir provincia actual del usuario
-      if (titleCaseWords(n) === titleCaseWords(provincia.value)) return;
+    // ====== cargar destinos ======
+    if (category.value === "ir_provincia") {
+      const provs = await getCollectionCache("provincias");
+      const provNames = [];
 
-      provs.push(n);
-    });
+      provs.forEach(p => {
+        const n = titleCaseWords(p.Nombre || p.nombre);
+        if (!n) return;
 
-    provs.sort((a, b) => a.localeCompare(b));
-    provs.forEach(n => (destSel.innerHTML += `<option value="${n}">${n}</option>`));
+        if (titleCaseWords(n) === titleCaseWords(provincia.value)) return; // excluir provincia actual
 
-  } else {
-    // cantones de la provincia del usuario (por codigo_provincia) excluyendo su cantón
-    const cantSnap = await getDocs(collection(db, "cantones"));
-    const cants = [];
+        const ub = p.ubicación || p.ubicacion;
+        if (ub?.latitude && ub?.longitude) provIndex.set(n, [ub.latitude, ub.longitude]);
 
-    cantSnap.forEach(d => {
-      const c = d.data();
-      const cp = String(c.codigo_provincia || "").trim().toLowerCase();
+        provNames.push(n);
+      });
 
-      if (!userProvinciaCode || cp !== String(userProvinciaCode).toLowerCase()) return;
+      provNames.sort((a, b) => a.localeCompare(b));
+      provNames.forEach(n => (destSel.innerHTML += `<option value="${n}">${n}</option>`));
 
-      const n = titleCaseWords(c.nombre || c.Nombre);
-      if (!n) return;
+    } else {
+      const cants = await getCollectionCache("cantones");
+      const cantNames = [];
 
-      if (titleCaseWords(n) === titleCaseWords(canton.value)) return; // excluir cantón actual
+      cants.forEach(c => {
+        const cp = String(c.codigo_provincia || "").trim().toLowerCase();
+        if (!userProvinciaCode || cp !== String(userProvinciaCode).toLowerCase()) return;
 
-      cants.push(n);
-    });
+        const n = titleCaseWords(c.nombre || c.Nombre);
+        if (!n) return;
 
-    cants.sort((a, b) => a.localeCompare(b));
-    cants.forEach(n => (destSel.innerHTML += `<option value="${n}">${n}</option>`));
-  }
+        if (titleCaseWords(n) === titleCaseWords(canton.value)) return; // excluir cantón actual
 
-  // ====== helper: calcular y pintar (se llama al cambiar destino o modo) ======
-  async function recomputeAdminRoute() {
-    if (!destSel.value || !targetLL) {
-      infoEl.innerHTML = "";
-      return;
+        const ub = c.ubicación || c.ubicacion;
+        if (ub?.latitude && ub?.longitude) cantIndex.set(n, [ub.latitude, ub.longitude]);
+
+        cantNames.push(n);
+      });
+
+      cantNames.sort((a, b) => a.localeCompare(b));
+      cantNames.forEach(n => (destSel.innerHTML += `<option value="${n}">${n}</option>`));
     }
 
-    const userLoc = getUserLocation();
-    if (!userLoc) {
-      infoEl.innerHTML = "❌ No hay ubicación de usuario.";
-      return;
-    }
+    // ====== helper: calcular y pintar (se llama al cambiar destino o modo) ======
+    async function recomputeAdminRoute() {
+      if (!destSel.value || !targetLL) {
+        infoEl.innerHTML = "";
+        return;
+      }
 
-    // auto = directo al destino
-    if (adminMode === "driving") {
+      const userLoc = getUserLocation();
+      if (!userLoc) {
+        infoEl.innerHTML = "❌ No hay ubicación de usuario.";
+        return;
+      }
+
+      // auto = directo al destino
+      if (adminMode === "driving") {
+        clearTransportLayers();
+        clearRoute();
+
+        infoEl.innerHTML = `
+          <div class="alert alert-info py-2 mb-2">
+            📌 Ruta directa al destino (Auto).
+          </div>
+        `;
+
+        const fakePlace = { nombre: destSel.value, ubicacion: { latitude: targetLL[0], longitude: targetLL[1] } };
+        await drawRoute(userLoc, fakePlace, "driving", infoEl);
+        return;
+      }
+
+      // walking/bicycle/motorcycle/bus = vía terminal
+      const terminal = await getUserCantonTerminal();
+      if (!terminal?.ubicacion?.latitude || !terminal?.ubicacion?.longitude) {
+        infoEl.innerHTML = `
+          <div class="alert alert-danger py-2 mb-2">
+            ❌ No hay un <b>Terminal</b> registrado en tu cantón (${canton.value}).
+          </div>
+        `;
+        return;
+      }
+
+      const terminalLL = [terminal.ubicacion.latitude, terminal.ubicacion.longitude];
+
+      showModal(
+        "Transporte interprovincial",
+        `Debes tomar <b>transporte interprovincial</b> desde el <b>Terminal Terrestre</b> del cantón <b>${canton.value}</b>.`
+      );
+
       clearTransportLayers();
       clearRoute();
 
-      infoEl.innerHTML = `
-        <div class="alert alert-info py-2 mb-2">
-          📌 Ruta directa al destino (Auto).
-        </div>
-      `;
+      // BUS: mostrar línea que te deja cerca al terminal
+      if (adminMode === "bus") {
+        infoEl.innerHTML = `
+          <div class="alert alert-info py-2 mb-2">
+            ⏳ Buscando línea en bus hacia el <b>Terminal</b>…
+          </div>
+        `;
 
-      // usa tu drawRoute normal pero necesita un "place" con ubicacion
-      const fakePlace = { nombre: destSel.value, ubicacion: { latitude: targetLL[0], longitude: targetLL[1] } };
-      await drawRoute(userLoc, fakePlace, "driving", infoEl);
+        await planAndShowBusStops(
+          userLoc,
+          terminal,
+          {
+            tipo: "urbano",
+            provincia: provincia.value,
+            canton: canton.value,
+            parroquia: parroquia.value,
+            now: new Date()
+          },
+          { infoEl }
+        );
 
-      return;
-    }
+        await drawRouteBetweenPoints({
+          from: terminalLL,
+          to: targetLL,
+          mode: "driving",
+          color: "#0d6efd",
+          dash: false
+        });
 
-    // walking/bicycle/motorcycle/bus = vía terminal
-    const terminal = await getUserCantonTerminal(); // debe devolverte doc lugar terminal del cantón usuario
-    if (!terminal?.ubicacion?.latitude || !terminal?.ubicacion?.longitude) {
-      infoEl.innerHTML = `
-        <div class="alert alert-danger py-2 mb-2">
-          ❌ No hay un <b>Terminal</b> registrado en tu cantón (${canton.value}).
-        </div>
-      `;
-      return;
-    }
+        infoEl.innerHTML += `
+          <div class="mt-2">
+            <b>Tramo 2</b>: Terminal → ${destSel.value}<br>
+            <small>* Ruta referencial (aprox.).</small>
+          </div>
+        `;
 
-    const terminalLL = [terminal.ubicacion.latitude, terminal.ubicacion.longitude];
+        map.fitBounds(L.latLngBounds([userLoc, terminalLL, targetLL]).pad(0.2));
+        return;
+      }
 
-    // popup cerrable (solo aquí)
-    showModal(
-      "Transporte interprovincial",
-      `Debes tomar <b>transporte interprovincial</b> desde el <b>Terminal Terrestre</b> del cantón <b>${canton.value}</b>.`
-    );
+      const osrmMode = (adminMode === "motorcycle") ? "driving" : adminMode;
 
-    clearTransportLayers();
-    clearRoute();
-
-    // BUS: mostrar línea que te deja cerca al terminal
-    if (adminMode === "bus") {
-      infoEl.innerHTML = `
-        <div class="alert alert-info py-2 mb-2">
-          ⏳ Buscando línea en bus hacia el <b>Terminal</b>…
-        </div>
-      `;
-
-      await planAndShowBusStops(
+      await drawTwoLegOSRM({
         userLoc,
-        terminal,
-        {
-          tipo: "urbano",
-          provincia: provincia.value,
-          canton: canton.value,
-          parroquia: parroquia.value,
-          now: new Date()
-        },
-        { infoEl }
-      );
-
-      // tramo 2: terminal -> destino en auto (otro color)
-      await drawRouteBetweenPoints({
-        from: terminalLL,
-        to: targetLL,
-        mode: "driving",
-        color: "#0d6efd",
-        dash: false
+        terminalLoc: terminalLL,
+        targetLoc: targetLL,
+        mode: osrmMode,
+        // Nota: tus funciones aceptan colores; si quieres 0 cambios visuales,
+        // puedes mantenerlos igual que antes o quitar estos campos si no son necesarios.
+        color1: "#6c757d",
+        color2: "#0d6efd",
+        infoBox: infoEl,
+        title: `Ruta vía Terminal → ${destSel.value}`
       });
 
-      infoEl.innerHTML += `
-        <div class="mt-2">
-          <b>Tramo 2</b>: Terminal → ${destSel.value}<br>
-          <small>* Ruta referencial (aprox.).</small>
-        </div>
-      `;
-
-      map.fitBounds(L.latLngBounds([userLoc, terminalLL, targetLL]).pad(0.2));
-      return;
+      infoEl.innerHTML += `<div class="small mt-1">* Ruta referencial (aprox.).</div>`;
     }
 
-    // walking/bicycle/motorcycle: 2 tramos OSRM con colores diferentes
-    const osrmMode = (adminMode === "motorcycle") ? "driving" : adminMode;
+    // ====== cuando elige destino: resolver ubicación SIN consultas ======
+    destSel.onchange = async () => {
+      const name = destSel.value;
+      targetLL = null;
 
-    await drawTwoLegOSRM({
-      userLoc,
-      terminalLoc: terminalLL,
-      targetLoc: targetLL,
-      mode: osrmMode,
-      color1: "#6c757d", // usuario->terminal (gris)
-      color2: "#0d6efd", // terminal->destino (azul)
-      infoBox: infoEl,
-      title: `Ruta vía Terminal → ${destSel.value}`
-    });
+      if (!name) {
+        infoEl.innerHTML = "";
+        return;
+      }
 
-    infoEl.innerHTML += `<div class="small mt-1">* Ruta referencial (aprox.).</div>`;
-  }
+      if (category.value === "ir_provincia") {
+        targetLL = provIndex.get(name) || null;
+      } else {
+        targetLL = cantIndex.get(name) || null;
+      }
 
-  // ====== cuando elige destino: resolver ubicación del doc ======
-  destSel.onchange = async () => {
-    const name = destSel.value;
-    targetLL = null;
+      if (!targetLL) {
+        infoEl.innerHTML = `❌ El destino seleccionado no tiene ubicación registrada.`;
+        return;
+      }
 
-    if (!name) {
-      infoEl.innerHTML = "";
-      return;
-    }
-
-    if (category.value === "ir_provincia") {
-      const provSnap = await getDocs(collection(db, "provincias"));
-      provSnap.forEach(d => {
-        const p = d.data();
-        const n = titleCaseWords(p.Nombre || p.nombre);
-        if (titleCaseWords(n) !== titleCaseWords(name)) return;
-        const ub = p.ubicación || p.ubicacion;
-        if (ub?.latitude && ub?.longitude) targetLL = [ub.latitude, ub.longitude];
-      });
-    } else {
-      const cantSnap = await getDocs(collection(db, "cantones"));
-      cantSnap.forEach(d => {
-        const c = d.data();
-        const n = titleCaseWords(c.nombre || c.Nombre);
-        if (titleCaseWords(n) !== titleCaseWords(name)) return;
-        const ub = c.ubicación || c.ubicacion;
-        if (ub?.latitude && ub?.longitude) targetLL = [ub.latitude, ub.longitude];
-      });
-    }
-
-    if (!targetLL) {
-      infoEl.innerHTML = `❌ El destino seleccionado no tiene ubicación registrada.`;
-      return;
-    }
-
-    await recomputeAdminRoute();
-  };
-
-  // ====== al cambiar modo: recalcular ======
-  extra.querySelectorAll("[data-admin-mode]").forEach(btn => {
-    btn.onclick = async () => {
-      adminMode = btn.dataset.adminMode || "driving";
-      extra.querySelectorAll("[data-admin-mode]").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
       await recomputeAdminRoute();
     };
-  });
 
-  return;
-}
+    // ====== al cambiar modo: recalcular ======
+    extra.querySelectorAll("[data-admin-mode]").forEach(btn => {
+      btn.onclick = async () => {
+        adminMode = btn.dataset.adminMode || "driving";
+        extra.querySelectorAll("[data-admin-mode]").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        await recomputeAdminRoute();
+      };
+    });
 
+    return;
+  }
 
-
-  /* ===== LÍNEAS DE TRANSPORTE (tu bloque ya existente) ===== */
+  /* ===== LÍNEAS DE TRANSPORTE ===== */
   if (category.value === "transporte_lineas") {
     extra.innerHTML = `
       <div id="lineas-status" class="small mb-2"></div>
@@ -588,7 +577,9 @@ if (category.value === "ir_provincia" || category.value === "ir_canton") {
   }
 
   /* ===== LUGARES POR CATEGORÍA (todo el cantón, prioridad parroquia) ===== */
-  const snap = await getDocs(collection(db, "lugar"));
+  // ✅ Antes: getDocs(collection(db,"lugar")) en cada cambio de categoría
+  // ✅ Ahora: 1 sola carga por sesión y filtrar en JS
+  const lugares = await getCollectionCache("lugar");
   const all = [];
 
   const provSel = provincia.value;
@@ -596,14 +587,11 @@ if (category.value === "ir_provincia" || category.value === "ir_canton") {
   const catSel = String(category.value || "").toLowerCase();
   const parroquiaSel = parroquia.value;
 
-  snap.forEach(d => {
-    const l = d.data();
+  lugares.forEach(l => {
     if (!l?.activo) return;
-
     if (l.provincia !== provSel) return;
     if (l.ciudad !== cantonSel) return;
     if (String(l.subcategoria || "").toLowerCase() !== catSel) return;
-
     all.push(l);
   });
 
