@@ -97,8 +97,50 @@ function parseFreqRange(s) {
 }
 
 /* ==========================
+   DÍAS (RURAL / GENERAL)
+========================== */
+function normDias(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function isOperatingTodayByDias(linea, now = new Date()) {
+  const dias = normDias(linea?.dias);
+  if (!dias) return true;
+
+  if (dias.includes("lunes a domingo") || dias.includes("todos") || dias.includes("diario")) return true;
+
+  const day = now.getDay(); // 0 dom ... 6 sab
+  const isWk = day >= 1 && day <= 5;
+
+  if (dias.includes("lunes a viernes")) return isWk;
+
+  const hasLun = dias.includes("lunes");
+  const hasMar = dias.includes("martes");
+  const hasMie = dias.includes("miercoles") || dias.includes("miércoles");
+  const hasJue = dias.includes("jueves");
+  const hasVie = dias.includes("viernes");
+  const hasSab = dias.includes("sabado") || dias.includes("sábado");
+  const hasDom = dias.includes("domingo");
+
+  const any = hasLun || hasMar || hasMie || hasJue || hasVie || hasSab || hasDom;
+  if (!any) return true;
+
+  if (day === 1) return hasLun;
+  if (day === 2) return hasMar;
+  if (day === 3) return hasMie;
+  if (day === 4) return hasJue;
+  if (day === 5) return hasVie;
+  if (day === 6) return hasSab;
+  if (day === 0) return hasDom;
+
+  return true;
+}
+
+/* ==========================
    PARSEO CÓDIGO: prefijo + numeral
-   ej: "pfi11" -> {prefix:"pfi", num:11}
 ========================== */
 function parseCodigoParts(codigo) {
   const c = String(codigo || "").trim().toLowerCase();
@@ -121,54 +163,47 @@ function safeOrdenDerivado(p, fallback = 999999) {
 }
 
 /* ==========================
-   Reglas de orden por prefijo (RURAL)
-   - ida: pfi antes que pfis
-   - vuelta: pfv antes que pfvs
-========================== */
-function prefixWeight(prefix, sentidoLower) {
-  const p = String(prefix || "").toLowerCase();
-  const s = String(sentidoLower || "").toLowerCase();
-
-  if (s === "ida") {
-    if (p === "pfi") return 10;
-    if (p === "pfis") return 20;
-  }
-  if (s === "vuelta") {
-    if (p === "pfv") return 10;
-    if (p === "pfvs") return 20;
-  }
-
-  return 50; // otras (referenciales/ramales/etc.)
-}
-
-/* ==========================
    OPERATIVIDAD
 ========================== */
 export function isLineOperatingNow(linea, now = new Date()) {
   if (!linea?.activo) return false;
 
-  const tipo = normStr(linea?.tipo);
+  // ✅ respeta días si existe
+  if (!isOperatingTodayByDias(linea, now)) return false;
 
-  // ✅ RURAL: (A) listas ida/retorno o (B) horario+frecuencia (lr15)
+  const tipo = normStr(linea?.tipo);
+  const cur = nowMinutes(now);
+
+  // ✅ RURAL
   if (tipo === "rural") {
+    // A) si tiene arrays (ida/retorno), operativa si hay alguna salida hoy y aún no pasó la última
     const ida = Array.isArray(linea.horario_ida) ? linea.horario_ida : [];
     const ret = Array.isArray(linea.horario_retorno) ? linea.horario_retorno : [];
 
-    const anyValid =
-      ida.some(x => parseHHMM(x) != null) || ret.some(x => parseHHMM(x) != null);
+    const all = [...ida, ...ret].map(parseHHMM).filter(v => v != null).sort((a, b) => a - b);
+    if (all.length) {
+      const first = all[0];
+      const last = all[all.length - 1];
+      if (first <= last) return cur >= first && cur <= last;
+      return cur >= first || cur <= last;
+    }
 
-    if (anyValid) return true;
+    // B) ✅ lr15-like (horario_inicio/horario_fin)
+    const ini = parseHHMM(linea?.horario_inicio);
+    const fin = parseHHMM(linea?.horario_fin);
+    if (ini != null && fin != null) {
+      if (ini <= fin) return cur >= ini && cur <= fin;
+      return cur >= ini || cur <= fin;
+    }
 
+    // C) compatibilidad antigua (horario string)
     const r = parseRangeAny(linea?.horario);
-    if (!r) return false;
-
-    const cur = nowMinutes(now);
+    if (!r) return true; // no bloquees si no hay info
     if (r.start <= r.end) return cur >= r.start && cur <= r.end;
     return cur >= r.start || cur <= r.end;
   }
 
   // ✅ URBANO (tu lógica)
-  const cur = nowMinutes(now);
   const wknd = isWeekend(now);
 
   if (wknd && Array.isArray(linea.horariofinsem) && linea.horariofinsem.length) {
@@ -194,6 +229,12 @@ export function isLineOperatingNow(linea, now = new Date()) {
 export function formatLineScheduleHTML(linea) {
   const tipo = normStr(linea?.tipo);
 
+  const esc = (s) =>
+    String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+
   // ✅ RURAL
   if (tipo === "rural") {
     const dias = String(linea?.dias || "").trim() || "(sin dato)";
@@ -204,42 +245,57 @@ export function formatLineScheduleHTML(linea) {
     const hasList =
       ida.some(x => parseHHMM(x) != null) || ret.some(x => parseHHMM(x) != null);
 
-    // modo B (lr15): horario+frecuencia
-    if (!hasList) {
-      const r = parseRangeAny(linea?.horario);
-      const fr = parseFreqRange(linea?.frecuencia);
-
-      const horarioTxt = r ? String(linea?.horario).trim() : "(sin horario)";
-      const freqTxt = fr
-        ? (fr.min === fr.max
-          ? `⏱️ <b>Frecuencia</b>: cada ${fr.min} min`
-          : `⏱️ <b>Frecuencia</b>: cada ${fr.min}–${fr.max} min`)
-        : `⏱️ <b>Frecuencia</b>: (sin dato)`;
+    // A) listas ida/retorno => DOS COLUMNAS (lado a lado)
+    if (hasList) {
+      const fmtItems = (arr) => {
+        const clean = (arr || []).map(x => String(x || "").trim()).filter(Boolean);
+        if (!clean.length) return `<li>(sin horarios)</li>`;
+        return clean.map(x => `<li>${esc(x)}</li>`).join("");
+      };
 
       return `
-        🗓️ <b>Días</b>: ${dias}<br>
-        🕒 <b>Horario</b>: ${horarioTxt}<br>
-        ${freqTxt}
+        <div class="mb-2"><b>🗓️ Días:</b> ${esc(dias)}</div>
+        <div style="display:flex; gap:14px; align-items:flex-start">
+          <div style="flex:1">
+            <div style="font-weight:600; margin-bottom:6px">🧭 Ida</div>
+            <ul style="margin:0; padding-left:18px">${fmtItems(ida)}</ul>
+          </div>
+          <div style="flex:1">
+            <div style="font-weight:600; margin-bottom:6px">🔁 Retorno</div>
+            <ul style="margin:0; padding-left:18px">${fmtItems(ret)}</ul>
+          </div>
+        </div>
       `;
     }
 
-    // modo A: listas ida/retorno
-    const fmtList = (arr) => {
-      const clean = (arr || []).map(x => String(x || "").trim()).filter(Boolean);
-      return clean.length ? clean.map(x => `• ${x}`).join("<br>") : "(sin horarios)";
-    };
+    // B) ✅ lr15-like: horario_inicio/fin + frecuencia_min/max
+    const hIni = String(linea?.horario_inicio || "").trim();
+    const hFin = String(linea?.horario_fin || "").trim();
+
+    const fmin = Number(linea?.frecuencia_min);
+    const fmax = Number(linea?.frecuencia_max);
+
+    const horarioTxt = (hIni && hFin) ? `${esc(hIni)} a ${esc(hFin)}` : "(sin horario)";
+
+    let freqTxt = "(sin dato)";
+    if (Number.isFinite(fmin) && fmin > 0 && Number.isFinite(fmax) && fmax > 0) {
+      freqTxt = `${fmin} - ${fmax} min`;
+    } else if (Number.isFinite(fmin) && fmin > 0) {
+      freqTxt = `${fmin} min`;
+    } else {
+      // compatibilidad antigua: "15 a 30 minutos"
+      const fr = parseFreqRange(linea?.frecuencia);
+      if (fr) freqTxt = (fr.min === fr.max) ? `${fr.min} min` : `${fr.min} - ${fr.max} min`;
+    }
 
     return `
-      🗓️ <b>Días</b>: ${dias}<br><br>
-      🧭 <b>Ida</b>:
-      <div class="mt-1">${fmtList(ida)}</div>
-      <br>
-      🧭 <b>Retorno</b>:
-      <div class="mt-1">${fmtList(ret)}</div>
+      <div class="mb-2"><b>🗓️ Días:</b> ${esc(dias)}</div>
+      <div class="mb-2"><b>🕒 Horario:</b> ${horarioTxt}</div>
+      <div class="mb-2"><b>⏱️ Frecuencia:</b> ${esc(freqTxt)}</div>
     `;
   }
 
-  // ✅ URBANO
+  // ✅ URBANO (igual que lo tenías)
   const hIni = String(linea?.horario_inicio || "").trim();
   const hFin = String(linea?.horario_fin || "").trim();
   const freq = Number(linea?.frecuencia_min);
@@ -279,8 +335,6 @@ export function formatLineScheduleHTML(linea) {
 
 /* ==========================
    LÍNEAS (cacheadas)
-   - urbano => lineas_transporte
-   - rural => lineas_rurales
 ========================== */
 export async function getLineasByTipo(tipo, ctx = {}) {
   const t = normStr(tipo);
@@ -331,17 +385,12 @@ export async function getLineasByTipoAll(tipo, ctx = {}) {
 export async function getParadasByLinea(codigoLinea, ctx = {}) {
   const tipo = normStr(ctx?.tipo);
 
-  // =========================
   // ✅ RURAL: paradas_rurales
-  // - filtra por lineasruralpasan incluye codigoLinea
-  // - filtra por sentido si viene en ctx
-  // - ordena por numeral (number)
-  // =========================
   if (tipo === "rural") {
     const all = await getCollectionCache("paradas_rurales");
     const paradas = [];
 
-    const sentidoSel = normStr(ctx?.sentido); // "ida" / "vuelta" (puede venir como "Ida" -> normStr ok)
+    const sentidoSel = normStr(ctx?.sentido);
 
     all.forEach(p => {
       if (!p?.activo) return;
@@ -357,14 +406,12 @@ export async function getParadasByLinea(codigoLinea, ctx = {}) {
       paradas.push(p);
     });
 
-    // ✅ orden REAL por numeral
+    // ✅ base: por numeral (tu rural_controller reordena por prefijos después)
     paradas.sort((a, b) => (Number(a?.numeral) || 0) - (Number(b?.numeral) || 0));
     return paradas;
   }
 
-  // =========================
-  // URBANO (como lo tenías)
-  // =========================
+  // ✅ URBANO
   const all = await getCollectionCache("paradas_transporte");
   const paradas = [];
 

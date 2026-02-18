@@ -127,6 +127,12 @@ function getParadaLatLng(p) {
   return [latitude, longitude];
 }
 
+function isMarcadorVisible(p) {
+  // ✅ SOLO marcadores para "parada"
+  const d = String(p?.denominacion || "").toLowerCase().trim();
+  return d === "parada";
+}
+
 function parseCodigoParts(codigo) {
   const c = String(codigo || "").trim().toLowerCase();
   const m = c.match(/^([a-z_]+?)(\d+)$/);
@@ -208,6 +214,7 @@ function buildOrderedStopsForLinea(paradasAll, sentido) {
     out.push(...sortByNumeralStable(group));
   }
 
+  // quitar duplicados por código
   const seen = new Set();
   const final = [];
   for (const p of out) {
@@ -222,40 +229,12 @@ function buildOrderedStopsForLinea(paradasAll, sentido) {
 
 /**
  * ✅ CORTA la lista en el primer finderuta:true (incluye ese punto)
- * Si no existe, retorna la lista tal cual.
  */
 function cutStopsAtFinDeRuta(paradas) {
   if (!Array.isArray(paradas) || !paradas.length) return [];
   const idx = paradas.findIndex(p => p?.finderuta === true);
   if (idx === -1) return paradas;
   return paradas.slice(0, idx + 1);
-}
-
-/* =====================================================
-   DEBUG: header en popup
-===================================================== */
-function buildDebugHeaderHTML(p) {
-  const codigo = String(p?.codigo || "");
-  const { prefix, num } = parseCodigoParts(codigo);
-  const numeral = Number.isFinite(Number(p?.numeral)) ? Number(p.numeral) : null;
-  const denom = String(p?.denominacion || "");
-  const sentido = String(p?.sentido || "");
-  const fin = p?.finderuta === true ? "✅" : "—";
-
-  return `
-    <div style="margin-bottom:6px">
-      <div><b>${codigo || "(sin código)"}</b> <span style="opacity:.8">fin:${fin}</span></div>
-      <div style="opacity:.85">
-        prefijo: <b>${prefix || "-"}</b>
-        • num(código): <b>${Number.isFinite(num) ? num : "-"}</b>
-        • numeral: <b>${numeral ?? "-"}</b>
-      </div>
-      <div style="opacity:.85">
-        denom: <b>${denom || "-"}</b>
-        ${sentido ? ` • sentido: <b>${sentido}</b>` : ""}
-      </div>
-    </div>
-  `;
 }
 
 /* =====================================================
@@ -357,8 +336,10 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
 
 /* =====================================================
    MOSTRAR RUTA (RURAL)
-   ✅ Marcadores: TODOS (debug)
+   ✅ Marcadores: SOLO "parada"
+   ✅ Ruta incluye referenciales (sin marcador)
    ✅ Ruta termina en finderuta:true
+   ✅ split amarillo (vuelta lr1..lr14 desde pfv12)
 ===================================================== */
 export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   clearTransportLayers();
@@ -375,10 +356,7 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
 
   if (!paradasRaw?.length) return;
 
-  // 1) Orden por prefijos
   const ordered = buildOrderedStopsForLinea(paradasRaw, sentidoLower);
-
-  // 2) Cortar por fin de ruta
   const paradas = cutStopsAtFinDeRuta(ordered);
 
   setCurrentParadas(paradas);
@@ -397,26 +375,23 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
     const ll = getParadaLatLng(p);
     if (!ll) continue;
 
+    // ✅ SIEMPRE entra a la geometría (incluye referenciales)
     coords.push(ll);
 
-    const denom = String(p?.denominacion || "").toLowerCase().trim();
-    const isRef = denom === "referencial";
-    const isFin = p?.finderuta === true;
+    // ✅ marcador solo si denominacion="parada"
+    if (!isMarcadorVisible(p)) continue;
 
     const marker = L.circleMarker(ll, {
-      radius: isFin ? 9 : (isRef ? 5 : 7),
-      color: isFin ? "#dc3545" : (isRef ? "#6c757d" : (linea.color || "#000")),
-      fillOpacity: isFin ? 0.95 : (isRef ? 0.65 : 0.9),
+      radius: 7,
+      color: linea.color || "#000",
+      fillOpacity: 0.9,
       weight: 2
     }).addTo(layerParadas);
 
-    marker.bindPopup(
-      `${buildDebugHeaderHTML(p)}${buildStopPopupHTML(p, linea)}`,
-      { autoPan: true }
-    );
+    marker.bindPopup(buildStopPopupHTML(p, linea), { autoPan: true });
 
     marker.on("popupopen", () => {
-      marker.setPopupContent(`${buildDebugHeaderHTML(p)}${buildStopPopupHTML(p, linea)}`);
+      marker.setPopupContent(buildStopPopupHTML(p, linea));
       startPopupLiveUpdate(marker, p);
     });
 
@@ -443,7 +418,7 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
     return;
   }
 
-  // split desde pfv12+
+  // split desde primera pfv>=12 (si existe)
   let cutIndex = -1;
   for (let i = 0; i < paradas.length; i++) {
     if (isPFVFromThreshold(paradas[i], 12)) {
@@ -452,7 +427,6 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
     }
   }
 
-  // si no hay corte amarillo, dibuja normal (pero igual termina por finderuta)
   if (cutIndex === -1) {
     const lineLayer = await drawLineRouteFollowingStreets(coords, COLOR_BASE);
     if (lineLayer) routesGroup.addLayer(lineLayer);
@@ -516,7 +490,7 @@ function resaltarYConectarParadaMasCercana(stopMarkers, linea) {
   resetNearestHighlight();
   setNearestHighlight(found.marker);
 
-  found.marker.bindPopup(`${buildDebugHeaderHTML(nearest)}${buildStopPopupHTML(nearest, linea)}`);
+  found.marker.bindPopup(buildStopPopupHTML(nearest, linea));
 
   const stopLatLng = [nearest.ubicacion.latitude, nearest.ubicacion.longitude];
   drawDashedAccessRoute(user, stopLatLng, "#666");

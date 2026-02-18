@@ -4,7 +4,6 @@ import { getCurrentLinea, getCurrentParadas, getCurrentStopOffsets } from "./tra
 
 /* =====================================================
    PARSEO DE CÓDIGO (prefijo+numeral) PARA OFFSETS
-   ✅ key única: "prefijo:num" evita colisiones (pfi1 vs pfis1)
 ===================================================== */
 function parseCodigoParts(codigo) {
   const c = String(codigo || "").trim().toLowerCase();
@@ -13,19 +12,22 @@ function parseCodigoParts(codigo) {
   return { prefix: m[1], num: Number(m[2]) };
 }
 
+/**
+ * ✅ Key estable para offsets (rural + urbano):
+ * 1) numeral (si existe)
+ * 2) orden (urbano)
+ * 3) prefijo:num (parseado del codigo)
+ */
 function getOrdenKey(p) {
-  // ✅ RURAL con campo numeral (prioridad)
-  const num = Number(p?.numeral);
-  if (Number.isFinite(num)) return String(num);
+  const n = Number(p?.numeral);
+  if (Number.isFinite(n)) return `n:${n}`;
 
-  // urbano: usa orden numérico si existe
   const o = Number(p?.orden);
-  if (Number.isFinite(o)) return String(o);
+  if (Number.isFinite(o)) return `o:${o}`;
 
-  // fallback: usa prefijo:num (por compatibilidad)
-  const { prefix, num: n2 } = parseCodigoParts(p?.codigo);
-  if (!Number.isFinite(n2)) return null;
-  return `${prefix}:${n2}`;
+  const { prefix, num } = parseCodigoParts(p?.codigo);
+  if (!Number.isFinite(num)) return null;
+  return `c:${prefix}:${num}`;
 }
 
 /* =====================================================
@@ -67,33 +69,32 @@ function tickPopupUpdate() {
   const el = popup?.getElement?.();
   if (!el) return;
 
-  const info = getNextBusInfoForStop(linea, paradas, activePopupParada, new Date());
+  const tipo = String(linea?.tipo || "").toLowerCase();
 
-  if (!info.activo) {
-    activePopupMarker.setPopupContent(buildStopPopupHTML(activePopupParada, linea));
+  // URBANO: actualizar spans (compatibilidad)
+  if (tipo === "urbano") {
+    const info = getNextBusInfoForStop(linea, paradas, activePopupParada, new Date());
+
+    if (!info.activo) {
+      activePopupMarker.setPopupContent(buildStopPopupHTML(activePopupParada, linea));
+      return;
+    }
+
+    const nextSpan = el.querySelector(".js-nextbus");
+    const cdSpan = el.querySelector(".js-countdown");
+
+    if (nextSpan) nextSpan.textContent = info.proximaHHMM;
+    if (cdSpan) cdSpan.textContent = formatCountdown(info.countdown);
     return;
   }
 
-  const nextSpan = el.querySelector(".js-nextbus");
-  const cdSpan = el.querySelector(".js-countdown");
-
-  if (nextSpan) nextSpan.textContent = info.proximaHHMM;
-
-  // ✅ rural: min / horas / días; urbano: formato original
-  const tipo = String(linea?.tipo || "").toLowerCase();
-  if (cdSpan) cdSpan.textContent = (tipo === "rural")
-    ? formatCountdownSmart(info.countdown)
-    : formatCountdown(info.countdown);
+  // RURAL: refresco completo (popup compacto)
+  activePopupMarker.setPopupContent(buildStopPopupHTML(activePopupParada, linea));
 }
 
 /* =====================================================
    UTIL tiempo
 ===================================================== */
-function isWeekend(date = new Date()) {
-  const d = date.getDay();
-  return d === 0 || d === 6;
-}
-
 function timeToMinutesStrict(t) {
   const m = String(t || "").trim().match(/^(\d{1,2}):(\d{2})$/);
   if (!m) return null;
@@ -110,7 +111,7 @@ function minutesToHHMM(m) {
   return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
 }
 
-// ✅ urbano (original)
+// Urbano original
 export function formatCountdown(sec) {
   const s = Math.max(0, Math.floor(sec));
   const mm = Math.floor(s / 60);
@@ -119,112 +120,72 @@ export function formatCountdown(sec) {
   return `${mm}m ${String(ss).padStart(2, "0")}s`;
 }
 
-// ✅ rural: en minutos; si pasa 60 => horas; si pasa 24h => días
-function formatCountdownSmart(sec) {
-  const s = Math.max(0, Math.round(Number(sec) || 0));
-  const totalMin = Math.ceil(s / 60);
-
-  if (totalMin < 60) return `${totalMin} min`;
-
-  const totalH = Math.floor(totalMin / 60);
-  const remMin = totalMin % 60;
-
-  if (totalH < 24) {
-    if (remMin === 0) return `${totalH} h`;
-    return `${totalH} h ${remMin} min`;
-  }
-
-  const days = Math.floor(totalH / 24);
-  const remH = totalH % 24;
-
-  if (remH === 0 && remMin === 0) return `${days} d`;
-  if (remMin === 0) return `${days} d ${remH} h`;
-  return `${days} d ${remH} h ${remMin} min`;
+/**
+ * ✅ Formato humano para RURAL: "X min" o "H h M min"
+ */
+const THRESH_MIN_TO_HOURS = 60;
+function formatWaitHumanFromMinutes(minsFloat) {
+  const mins = Math.max(0, Math.round(Number(minsFloat) || 0));
+  if (mins < THRESH_MIN_TO_HOURS) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h} h ${m} min`;
 }
 
 /* =====================================================
-   Ventanas fin de semana (urbano)
+   DÍAS (para que lr15 marque operativa bien)
 ===================================================== */
-function parseWindow(str) {
-  const m = String(str || "").match(/(\d{1,2}:\d{2})\s*(?:a|-|–)\s*(\d{1,2}:\d{2})/i);
-  if (!m) return null;
-  const a = timeToMinutesStrict(m[1]);
-  const b = timeToMinutesStrict(m[2]);
-  if (a == null || b == null) return null;
-  return { startMin: a, endMin: b };
+function normDias(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .trim();
 }
 
-function getServiceWindowsUrbano(linea, now) {
-  if (isWeekend(now) && Array.isArray(linea?.horariofinsem) && linea.horariofinsem.length) {
-    const windows = linea.horariofinsem.map(parseWindow).filter(Boolean);
-    if (windows.length) return windows;
-  }
+function isOperatingTodayByDias(linea, now = new Date()) {
+  const dias = normDias(linea?.dias);
+  if (!dias) return true;
 
-  return [{
-    startMin: timeToMinutesStrict(linea?.horario_inicio || "06:00") ?? 360,
-    endMin: timeToMinutesStrict(linea?.horario_fin || "19:30") ?? 1170,
-  }];
-}
+  if (dias.includes("lunes a domingo") || dias.includes("todos") || dias.includes("diario")) return true;
 
-function pickActiveWindow(windows, nowMin) {
-  return windows.find(w => nowMin >= w.startMin && nowMin <= w.endMin) || null;
+  const day = now.getDay(); // 0 dom ... 6 sab
+  const isWk = day >= 1 && day <= 5;
+
+  if (dias.includes("lunes a viernes")) return isWk;
+
+  const hasLun = dias.includes("lunes");
+  const hasMar = dias.includes("martes");
+  const hasMie = dias.includes("miercoles") || dias.includes("miércoles");
+  const hasJue = dias.includes("jueves");
+  const hasVie = dias.includes("viernes");
+  const hasSab = dias.includes("sabado") || dias.includes("sábado");
+  const hasDom = dias.includes("domingo");
+
+  const any = hasLun || hasMar || hasMie || hasJue || hasVie || hasSab || hasDom;
+  if (!any) return true;
+
+  if (day === 1) return hasLun;
+  if (day === 2) return hasMar;
+  if (day === 3) return hasMie;
+  if (day === 4) return hasJue;
+  if (day === 5) return hasVie;
+  if (day === 6) return hasSab;
+  if (day === 0) return hasDom;
+
+  return true;
 }
 
 /* =====================================================
-   ✅ HELPERS RURAL (lr15)
+   ✅ FIN DE RUTA (finderuta=true) o última
 ===================================================== */
-function parseRangeAny(s) {
-  const t = String(s || "").trim();
-  const m = t.match(/(\d{1,2}:\d{2})\s*(?:a|-|–)\s*(\d{1,2}:\d{2})/i);
-  if (!m) return null;
-  const a = timeToMinutesStrict(m[1]);
-  const b = timeToMinutesStrict(m[2]);
-  if (a == null || b == null) return null;
-  return { startMin: a, endMin: b };
-}
-
-function parseFreqRange(s) {
-  const t = String(s || "").toLowerCase();
-  const nums = t.match(/\d+/g)?.map(Number).filter(n => Number.isFinite(n) && n > 0) || [];
-  if (!nums.length) return null;
-  if (nums.length === 1) return { min: nums[0], max: nums[0] };
-  const a = Math.min(nums[0], nums[1]);
-  const b = Math.max(nums[0], nums[1]);
-  return { min: a, max: b };
+function getEndStop(paradasOrdenadas) {
+  const fin = paradasOrdenadas?.find(p => p?.finderuta === true);
+  if (fin) return fin;
+  return paradasOrdenadas?.[paradasOrdenadas.length - 1] || null;
 }
 
 /* =====================================================
-   Headway (urbano)
-===================================================== */
-function computeHeadwayMin(linea, paradasOrdenadas, now) {
-  const weekendFreq = Number(linea?.frecuenciafinsem);
-  const weekdayFreq = Number(linea?.frecuencia_min);
-
-  if (isWeekend(now) && Number.isFinite(weekendFreq) && weekendFreq > 0) return weekendFreq;
-  if (!isWeekend(now) && Number.isFinite(weekdayFreq) && weekdayFreq > 0) return weekdayFreq;
-
-  const cupo = Math.max(1, Number(linea?.cupo) || 1);
-  const speedKmH = Number(linea?.velocidad_promedio) || 16.5;
-
-  let totalMeters = 0;
-  for (let i = 1; i < paradasOrdenadas.length; i++) {
-    const a = paradasOrdenadas[i - 1]?.ubicacion;
-    const b = paradasOrdenadas[i]?.ubicacion;
-    if (!a || !b) continue;
-    totalMeters += map.distance([a.latitude, a.longitude], [b.latitude, b.longitude]);
-  }
-
-  const totalKm = totalMeters / 1000;
-  const oneWayMin = speedKmH > 0 ? (totalKm / speedKmH) * 60 : 0;
-  const cycleMin = oneWayMin * 2;
-
-  const headway = cycleMin > 0 ? (cycleMin / cupo) : 15;
-  return Math.max(3, Math.round(headway));
-}
-
-/* =====================================================
-   ✅ Offsets por parada (incluye referenciales con orden null)
-   ✅ Usa key = getOrdenKey(p)
+   ✅ Offsets por parada
 ===================================================== */
 export function computeStopOffsets(paradasOrdenadas, linea) {
   const offsets = new Map();
@@ -275,158 +236,254 @@ export function computeStopOffsets(paradasOrdenadas, linea) {
 
 /* =====================================================
    Próximo bus por parada
-   - URBANO: headway + windows
+   - URBANO: headway + windows (sin cambios)
    - RURAL:
-      A) horario_ida/horario_retorno (lista)
-      B) horario + frecuencia (lr15)
-   + extras rural:
-      - salida desde numeral 0 (salida0HHMM)
-      - llegada a última parada (llegadaFinalHHMM)
+      A) horario_ida/horario_retorno (emparejado por índice)
+      B) lr15-like: horario_inicio/fin + frecuencia_min/max
 ===================================================== */
+function isWeekend(date = new Date()) {
+  const d = date.getDay();
+  return d === 0 || d === 6;
+}
+
+function parseWindow(str) {
+  const m = String(str || "").match(/(\d{1,2}:\d{2})\s*(?:a|-|–)\s*(\d{1,2}:\d{2})/i);
+  if (!m) return null;
+  const a = timeToMinutesStrict(m[1]);
+  const b = timeToMinutesStrict(m[2]);
+  if (a == null || b == null) return null;
+  return { startMin: a, endMin: b };
+}
+
+function getServiceWindowsUrbano(linea, now) {
+  if (isWeekend(now) && Array.isArray(linea?.horariofinsem) && linea.horariofinsem.length) {
+    const windows = linea.horariofinsem.map(parseWindow).filter(Boolean);
+    if (windows.length) return windows;
+  }
+
+  return [{
+    startMin: timeToMinutesStrict(linea?.horario_inicio || "06:00") ?? 360,
+    endMin: timeToMinutesStrict(linea?.horario_fin || "19:30") ?? 1170,
+  }];
+}
+
+function pickActiveWindow(windows, nowMin) {
+  return windows.find(w => nowMin >= w.startMin && nowMin <= w.endMin) || null;
+}
+
+function computeHeadwayMin(linea, paradasOrdenadas, now) {
+  const weekendFreq = Number(linea?.frecuenciafinsem);
+  const weekdayFreq = Number(linea?.frecuencia_min);
+
+  if (isWeekend(now) && Number.isFinite(weekendFreq) && weekendFreq > 0) return weekendFreq;
+  if (!isWeekend(now) && Number.isFinite(weekdayFreq) && weekdayFreq > 0) return weekdayFreq;
+
+  const cupo = Math.max(1, Number(linea?.cupo) || 1);
+  const speedKmH = Number(linea?.velocidad_promedio) || 16.5;
+
+  let totalMeters = 0;
+  for (let i = 1; i < paradasOrdenadas.length; i++) {
+    const a = paradasOrdenadas[i - 1]?.ubicacion;
+    const b = paradasOrdenadas[i]?.ubicacion;
+    if (!a || !b) continue;
+    totalMeters += map.distance([a.latitude, a.longitude], [b.latitude, b.longitude]);
+  }
+
+  const totalKm = totalMeters / 1000;
+  const oneWayMin = speedKmH > 0 ? (totalKm / speedKmH) * 60 : 0;
+  const cycleMin = oneWayMin * 2;
+
+  const headway = cycleMin > 0 ? (cycleMin / cupo) : 15;
+  return Math.max(3, Math.round(headway));
+}
+
 function getNextBusInfoForStop(linea, paradasOrdenadas, parada, now = new Date()) {
   const tipo = String(linea?.tipo || "").toLowerCase();
   const nowMin = now.getHours() * 60 + now.getMinutes();
 
+  const key = getOrdenKey(parada);
   const offsets = getCurrentStopOffsets();
-
-  const keyStop = getOrdenKey(parada);
-  const offsetStop = keyStop ? (offsets.get(keyStop) || 0) : 0;
-
-  // última parada (para ETA final)
-  const last = Array.isArray(paradasOrdenadas) && paradasOrdenadas.length
-    ? paradasOrdenadas[paradasOrdenadas.length - 1]
-    : null;
-  const keyLast = last ? getOrdenKey(last) : null;
-  const offsetLast = keyLast ? (offsets.get(keyLast) || 0) : 0;
+  const offsetMin = key ? (offsets.get(key) || 0) : 0;
 
   /* ==========================
-     ✅ RURAL
+     ✅ RURAL (popup nuevo)
   ========================== */
   if (tipo === "rural") {
+    // respeta días
+    const todayOk = isOperatingTodayByDias(linea, now);
+    if (!todayOk) {
+      return {
+        activo: false,
+        operativo: false,
+        proximaHHMM: null,
+        countdown: null,
+        depOriginHHMM: null,
+        arrEndHHMM: null,
+        retHHMM: null,
+        mensaje: "⛔ Hoy no opera",
+        modo: "dias",
+      };
+    }
+
     const sentido = String(parada?.sentido || "").toLowerCase().trim();
 
     const ida = Array.isArray(linea?.horario_ida) ? linea.horario_ida : [];
     const ret = Array.isArray(linea?.horario_retorno) ? linea.horario_retorno : [];
 
-    const list = (sentido === "vuelta") ? ret : ida;
+    const depList = (sentido === "vuelta") ? ret : ida;
+    const retList = (sentido === "vuelta") ? ida : ret; // emparejado por índice
 
-    const depMins0 = (list || [])
-      .map(timeToMinutesStrict)
-      .filter(m => m != null)
-      .sort((a, b) => a - b);
+    const depPairs = (depList || [])
+      .map((t, idx) => ({ idx, depOriginMin: timeToMinutesStrict(t) }))
+      .filter(x => x.depOriginMin != null)
+      .sort((a, b) => a.depOriginMin - b.depOriginMin);
 
     // -------- MODO A: lista ida/retorno --------
-    if (depMins0.length) {
-      // siguiente salida desde "numeral 0"
-      const next0 = depMins0.find(m => m >= nowMin);
+    if (depPairs.length) {
+      let chosen = null;
+      for (const p of depPairs) {
+        const atStop = p.depOriginMin + offsetMin;
+        if (atStop >= nowMin) {
+          chosen = p;
+          break;
+        }
+      }
 
-      if (next0 == null) {
+      const lastDep = depPairs[depPairs.length - 1].depOriginMin;
+      const lastAtStop = lastDep + offsetMin;
+
+      const operativo = nowMin <= lastAtStop;
+
+      if (!chosen) {
         return {
           activo: false,
+          operativo,
           proximaHHMM: null,
           countdown: null,
-          freq: null,
+          depOriginHHMM: null,
+          arrEndHHMM: null,
+          retHHMM: null,
           mensaje: "⛔ No hay más salidas hoy",
-          horario: (list || []).join(", "),
+          modo: "lista",
         };
       }
 
-      // llegada a esta parada
-      const nextAtStop = next0 + offsetStop;
-      const secLeft = (nextAtStop - nowMin) * 60 - now.getSeconds();
+      const depOrigin = chosen.depOriginMin;
+      const atStop = depOrigin + offsetMin;
+      const secLeft = (atStop - nowMin) * 60 - now.getSeconds();
+
+      const endStop = getEndStop(paradasOrdenadas);
+      const endKey = endStop ? getOrdenKey(endStop) : null;
+      const endOffset = endKey ? (offsets.get(endKey) || 0) : offsetMin;
+
+      const arrEnd = depOrigin + endOffset;
+
+      let retHHMM = null;
+      if (retList?.length) {
+        const tRet = retList[chosen.idx];
+        const retMin = timeToMinutesStrict(tRet);
+        if (retMin != null) retHHMM = minutesToHHMM(retMin);
+      }
 
       return {
         activo: true,
-        proximaHHMM: minutesToHHMM(nextAtStop),
+        operativo: true,
+        proximaHHMM: minutesToHHMM(atStop),
         countdown: Math.max(0, secLeft),
-        freq: null,
+        depOriginHHMM: minutesToHHMM(depOrigin),
+        arrEndHHMM: minutesToHHMM(arrEnd),
+        retHHMM,
         mensaje: null,
-        horario: (list || []).join(", "),
-        salida0HHMM: minutesToHHMM(next0),
-        llegadaFinalHHMM: minutesToHHMM(next0 + offsetLast),
+        modo: "lista",
       };
     }
 
-    // -------- MODO B: lr15 (horario + frecuencia) --------
-    const win = parseRangeAny(linea?.horario);
-    const fr = parseFreqRange(linea?.frecuencia);
+    // -------- MODO B: lr15-like (inicio/fin + frecuencia min/max) --------
+    const start = timeToMinutesStrict(linea?.horario_inicio);
+    const end = timeToMinutesStrict(linea?.horario_fin);
+    const fmin = Number(linea?.frecuencia_min);
+    const fmax = Number(linea?.frecuencia_max);
 
-    if (!win || !fr) {
+    if (start == null || end == null || !Number.isFinite(fmin) || fmin <= 0) {
       return {
         activo: false,
+        operativo: false,
         proximaHHMM: null,
         countdown: null,
-        freq: null,
+        depOriginHHMM: null,
+        arrEndHHMM: null,
+        retHHMM: null,
         mensaje: "⛔ Sin horarios válidos registrados",
-        horario: "(sin horarios)",
+        modo: "frecuencia",
       };
     }
 
-    const start0 = win.startMin;         // salida desde numeral 0
-    const end0 = win.endMin;
+    const max = (Number.isFinite(fmax) && fmax > 0) ? fmax : fmin;
+    const freqAvg = Math.max(3, Math.round((fmin + max) / 2));
 
-    const startAtStop = start0 + offsetStop;
-    const endAtStop = end0 + offsetStop;
+    const startAtStop = start + offsetMin;
+    const endAtStop = end + offsetMin;
+
+    const endStop = getEndStop(paradasOrdenadas);
+    const endKey = endStop ? getOrdenKey(endStop) : null;
+    const endOffset = endKey ? (offsets.get(endKey) || 0) : offsetMin;
+
+    let nextAtStop = null;
+    let nextDepOrigin = null;
 
     if (nowMin < startAtStop) {
-      const secLeft = (startAtStop - nowMin) * 60 - now.getSeconds();
-      return {
-        activo: true,
-        proximaHHMM: minutesToHHMM(startAtStop),
-        countdown: Math.max(0, secLeft),
-        freq: null,
-        mensaje: null,
-        horario: `${minutesToHHMM(start0)} - ${minutesToHHMM(end0)} • cada ${fr.min}-${fr.max} min`,
-        salida0HHMM: minutesToHHMM(start0),
-        llegadaFinalHHMM: minutesToHHMM(start0 + offsetLast),
-      };
+      nextAtStop = startAtStop;
+      nextDepOrigin = start;
+    } else if (nowMin > endAtStop) {
+      nextAtStop = null;
+      nextDepOrigin = null;
+    } else {
+      const elapsed = nowMin - startAtStop;
+      const steps = Math.floor(elapsed / freqAvg);
+      nextAtStop = startAtStop + (steps + 1) * freqAvg;
+      nextDepOrigin = start + (steps + 1) * freqAvg;
+      if (nextAtStop > endAtStop) {
+        nextAtStop = null;
+        nextDepOrigin = null;
+      }
     }
 
-    if (nowMin > endAtStop) {
-      return {
-        activo: false,
-        proximaHHMM: null,
-        countdown: null,
-        freq: null,
-        mensaje: "⛔ Servicio finalizado por hoy",
-        horario: `${minutesToHHMM(start0)} - ${minutesToHHMM(end0)}`,
-      };
-    }
+    const operativo = (nowMin >= startAtStop && nowMin <= endAtStop);
 
-    const freqAvg = Math.max(3, Math.round((fr.min + fr.max) / 2));
-    const elapsed = nowMin - startAtStop;
-    const steps = Math.floor(elapsed / freqAvg);
-    const nextAtStop = startAtStop + (steps + 1) * freqAvg;
-
-    if (nextAtStop > endAtStop) {
+    if (nextAtStop == null || nextDepOrigin == null) {
       return {
         activo: false,
+        operativo,
         proximaHHMM: null,
         countdown: null,
-        freq: null,
+        depOriginHHMM: null,
+        arrEndHHMM: null,
+        retHHMM: null,
         mensaje: "⛔ Servicio finalizado por hoy",
-        horario: `${minutesToHHMM(start0)} - ${minutesToHHMM(end0)}`,
+        modo: "frecuencia",
       };
     }
 
-    // reconstruir next0 desde la parada 0
-    const next0 = (nextAtStop - offsetStop);
     const secLeft = (nextAtStop - nowMin) * 60 - now.getSeconds();
+    const arrEnd = nextDepOrigin + endOffset;
+
+    const retEst = nextDepOrigin + 2 * endOffset;
 
     return {
       activo: true,
+      operativo: true,
       proximaHHMM: minutesToHHMM(nextAtStop),
       countdown: Math.max(0, secLeft),
-      freq: null,
+      depOriginHHMM: minutesToHHMM(nextDepOrigin),
+      arrEndHHMM: minutesToHHMM(arrEnd),
+      retHHMM: minutesToHHMM(retEst),
       mensaje: null,
-      horario: `${minutesToHHMM(start0)} - ${minutesToHHMM(end0)} • cada ${fr.min}-${fr.max} min`,
-      salida0HHMM: minutesToHHMM(next0),
-      llegadaFinalHHMM: minutesToHHMM(next0 + offsetLast),
+      modo: "frecuencia",
     };
   }
 
   /* ==========================
-     ✅ URBANO
+     ✅ URBANO (SIN CAMBIOS)
   ========================== */
   const windows = getServiceWindowsUrbano(linea, now);
   const activeWin = pickActiveWindow(windows, nowMin);
@@ -447,8 +504,8 @@ function getNextBusInfoForStop(linea, paradasOrdenadas, parada, now = new Date()
 
   const headway = computeHeadwayMin(linea, paradasOrdenadas, now);
 
-  const startAtStop = activeWin.startMin + offsetStop;
-  const endAtStop = activeWin.endMin + offsetStop;
+  const startAtStop = activeWin.startMin + offsetMin;
+  const endAtStop = activeWin.endMin + offsetMin;
 
   if (nowMin < startAtStop) {
     const secLeft = (startAtStop - nowMin) * 60 - now.getSeconds();
@@ -491,39 +548,68 @@ function getNextBusInfoForStop(linea, paradasOrdenadas, parada, now = new Date()
 
 /* =====================================================
    HTML Popup
+   ✅ Urbano: igual que antes
+   ✅ Rural: compacto (no sobrecargado)
 ===================================================== */
 export function buildStopPopupHTML(parada, linea) {
   const lineaAct = getCurrentLinea() || linea;
   const paradasAct = getCurrentParadas();
-  const info = getNextBusInfoForStop(lineaAct, paradasAct, parada, new Date());
-
   const tipo = String(lineaAct?.tipo || "").toLowerCase();
 
-  // ✅ RURAL: popup minimal según tu pedido
+  // ============ RURAL (compacto) ============
   if (tipo === "rural") {
-    const codigoTxt = parada?.codigo
-      ? `<small><b>Código:</b> ${parada.codigo}</small><br>`
-      : "";
+    const info = getNextBusInfoForStop(lineaAct, paradasAct, parada, new Date());
 
-    if (!info.activo) {
+    const nombreRuta = lineaAct?.nombre || lineaAct?.denominacion || "Ruta rural";
+    const sentidoTxt = parada?.sentido ? String(parada.sentido) : "";
+
+    const estadoTxt = info?.operativo ? "✅ Operativa" : "⛔ No operativa";
+
+    // “Pasa en” en formato humano
+    let pasaTxt = "—";
+    if (info?.activo && typeof info.countdown === "number") {
+      pasaTxt = formatWaitHumanFromMinutes(info.countdown / 60);
+    }
+
+    if (!info?.activo) {
       return `
-        <strong>${lineaAct?.nombre || "Línea rural"}</strong><br>
-        ${codigoTxt}
-        ${info.mensaje || "⛔ Sin información"}<br>
-        <small>${info.horario || ""}</small>
+        <div style="min-width:240px">
+          <div><b>${nombreRuta}</b></div>
+          <div>${estadoTxt}</div>
+          ${sentidoTxt ? `<div>🧭 Sentido: ${sentidoTxt}</div>` : ""}
+          <hr class="my-2">
+          <div>${info?.mensaje || "⛔ Sin próxima salida"}</div>
+        </div>
       `;
     }
 
     return `
-      <strong>${lineaAct?.nombre || "Línea rural"}</strong><br>
-      ${codigoTxt}
-      🚌 Pasa en: <b><span class="js-countdown">${formatCountdownSmart(info.countdown)}</span></b><br>
-      🕒 Sale desde #0: <b>${info.salida0HHMM || "--:--"}</b><br>
-      ⏱️ Llega al final: <b>${info.llegadaFinalHHMM || "--:--"}</b>
+      <div style="min-width:240px">
+        <div><b>${nombreRuta}</b></div>
+        <div>${estadoTxt}</div>
+        ${sentidoTxt ? `<div>🧭 Sentido: ${sentidoTxt}</div>` : ""}
+        <hr class="my-2">
+        <div>🚌 <b>Pasa en:</b> ${pasaTxt}</div>
+
+        <div style="display:flex; gap:10px; margin-top:8px">
+          <div style="flex:1">
+            <div><b>🕒 Ida</b></div>
+            <div style="opacity:.95">${info.depOriginHHMM || "—"}</div>
+          </div>
+          <div style="flex:1; text-align:right">
+            <div><b>🔁 Retorno</b></div>
+            <div style="opacity:.95">${info.retHHMM || "—"}</div>
+          </div>
+        </div>
+
+        <div style="margin-top:8px">⏱️ <b>Llega:</b> ${info.arrEndHHMM || "—"}</div>
+      </div>
     `;
   }
 
-  // ✅ URBANO (mantener como estaba)
+  // ============ URBANO (SIN CAMBIOS) ============
+  const info = getNextBusInfoForStop(lineaAct, paradasAct, parada, new Date());
+
   const sentidoTxt = parada?.sentido ? `🧭 Sentido: ${parada.sentido}<br>` : "";
   const cobTxt = parada?.cobertura ? `🧩 Cobertura: ${parada.cobertura}<br>` : "";
 
