@@ -450,7 +450,9 @@ async function drawWalkOSRM(layerGroup, fromLatLng, toLatLng) {
 export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {}) {
   if (!userLoc || !destPlace?.ubicacion) return null;
 
+if (!ctx?.preserveLayers) {
   clearTransportLayers();
+}
 
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
 
@@ -634,9 +636,18 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   const w1 = await drawWalkOSRM(walkLayer, userLoc, boardLL);
   const w2 = await drawWalkOSRM(walkLayer, alightLL, destLoc);
 
-  if (ui?.infoEl) {
+    if (ui?.infoEl) {
     const walk1m = w1?.route?.distance ? Math.round(w1.route.distance) : Math.round(best.metrics.walk1);
     const walk2m = w2?.route?.distance ? Math.round(w2.route.distance) : Math.round(best.metrics.walk2);
+
+    const warnWalkMeters = 2300; // umbral “exagerado”
+    const totalWalk = walk1m + walk2m;
+
+    const warnHTML = (totalWalk >= warnWalkMeters)
+      ? `<div class="alert alert-warning py-2 mt-2 mb-0">
+           ⚠️ Se encontró ruta pero requiere caminar ~${(totalWalk/1000).toFixed(1)} km.
+         </div>`
+      : "";
 
     ui.infoEl.innerHTML = `
       <b>Ruta (bus)</b><br>
@@ -646,9 +657,10 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       🚍 Tramo bus (aprox): ${(best.metrics.busDist / 1000).toFixed(2)} km<br>
       🛑 Paradas aprox.: ${best.metrics.stopsCount}<br>
       🚶 Camina al destino: ${walk2m} m
+      ${warnHTML}
     `;
-    
   }
+
 
   map.fitBounds(L.latLngBounds([userLoc, destLoc, boardLL, alightLL]).pad(0.2));
   return { linea: bestLinea, plan: best };

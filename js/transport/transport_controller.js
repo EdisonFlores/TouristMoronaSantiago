@@ -19,11 +19,29 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   return urbano.mostrarRutaLinea(linea, opts, ctx);
 }
 
-/** ✅ MODO BUS para categorías normales */
+/**
+ * ✅ MODO BUS (AUTO):
+ * - prueba urbano primero (como estaba)
+ * - si no hay solución, prueba rural
+ * - Sevilla Don Bosco: permite combinado (rural + urbano Morona)
+ */
 export async function planAndShowBusStops(userLoc, destPlace, ctx = {}, ui = {}) {
-  const t = String(ctx?.tipo || "urbano").toLowerCase();
-  if (t === "rural") {
-    return rural.planAndShowBusStopsForPlace(userLoc, destPlace, ctx, ui);
-  }
-  return urbano.planAndShowBusStopsForPlace(userLoc, destPlace, ctx, ui);
+  const specialSevilla = ctx?.specialSevilla === true;
+
+  // 1) intento urbano
+  const urbanoRes = await urbano.planAndShowBusStopsForPlace(userLoc, destPlace, {
+    ...ctx,
+    tipo: "urbano",
+  }, ui);
+
+  if (urbanoRes) return urbanoRes;
+
+  // 2) intento rural (enganchar a ruta)
+  const ruralRes = await rural.planAndShowBusStopsForPlace(userLoc, destPlace, {
+    ...ctx,
+    tipo: "rural",
+    specialSevilla
+  }, ui);
+
+  return ruralRes;
 }

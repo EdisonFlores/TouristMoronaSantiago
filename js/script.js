@@ -28,18 +28,30 @@ import {
 } from "./transport/transport_controller.js";
 
 import { getLineasByTipoAll, isLineOperatingNow } from "./transport/core/transport_data.js";
-
-// ✅ Cache en memoria (tu módulo)
 import { getCollectionCache } from "./app/cache_db.js";
-
-// ✅ (Opcional) si aún los usas en otros lados, puedes quitarlos aquí.
-// import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
 /* ================= ESTADO GLOBAL ================= */
 let activePlace = null;
 let activeMode = "walking";
-let userProvinciaName = "";
-let userProvinciaCode = "";
+
+/**
+ * ✅ Fachada detectada (solo UI)
+ */
+let detectedAdmin = {
+  provincia: "",
+  canton: "",
+  parroquia: ""
+};
+
+/**
+ * ✅ Contexto lógico usado en filtros (puede diferir de fachada)
+ */
+let ctxGeo = {
+  provincia: "",
+  canton: "",
+  parroquia: "",
+  specialSevilla: false
+};
 
 /* ================= ELEMENTOS DEL DOM ================= */
 const provincia = document.getElementById("provincia");
@@ -47,6 +59,15 @@ const canton = document.getElementById("canton");
 const parroquia = document.getElementById("parroquia");
 const category = document.getElementById("category");
 const extra = document.getElementById("extra-controls");
+
+/* ================= UX: ocultar selects base desde el inicio ================= */
+function hideBaseSelects() {
+  // no los quitamos, solo los ocultamos
+  provincia?.classList?.add("d-none");
+  canton?.classList?.add("d-none");
+  parroquia?.classList?.add("d-none");
+}
+hideBaseSelects();
 
 /* ================= HELPERS ================= */
 function clearRouteInfo() {
@@ -73,7 +94,11 @@ function titleCaseWords(s) {
     .join(" ");
 }
 
-/* ================= MODAL (POP-UP) ================= */
+function normLite(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+/* ================= MODAL GENERAL ================= */
 function ensureModal() {
   if (document.getElementById("tm-modal")) return;
   const wrap = document.createElement("div");
@@ -106,18 +131,18 @@ function showModal(title, html) {
 
 /* ================= TERMINAL DEL CANTÓN ACTUAL ================= */
 async function getUserCantonTerminal() {
-  // ✅ Antes: getDocs(collection(db,"lugar")) => MUCHAS lecturas
-  // ✅ Ahora: 1 sola lectura por sesión
   const lugares = await getCollectionCache("lugar");
 
-  const provSel = provincia.value;
-  const cantonSel = canton.value;
+  // ciudad hace las veces de cantón (según tu BD)
+  // usamos ctxGeo.canton lógico
+  const provSel = ctxGeo.provincia;
+  const cantonSel = ctxGeo.canton;
 
   return (
     lugares.find(l => {
       if (!l?.activo) return false;
-      if (l.provincia !== provSel) return false;
-      if (l.ciudad !== cantonSel) return false; // ciudad = cantón
+      if (String(l.provincia || "") !== String(provSel || "")) return false;
+      if (String(l.ciudad || "") !== String(cantonSel || "")) return false;
       if (String(l.subcategoria || "").toLowerCase() !== "terminal") return false;
       return true;
     }) || null
@@ -148,7 +173,7 @@ async function buildRoute() {
     if (infoEl) {
       infoEl.innerHTML = `
         <div class="alert alert-info py-2 mb-2">
-          ⏳ Por favor espere… estamos buscando una ruta en bus.
+          ⏳ Buscando ruta en bus (urbano/rural)…
         </div>
       `;
     }
@@ -157,10 +182,11 @@ async function buildRoute() {
       getUserLocation(),
       activePlace,
       {
-        tipo: "urbano",
-        provincia: provincia.value,
-        canton: canton.value,
-        parroquia: parroquia.value,
+        tipo: "auto",
+        provincia: ctxGeo.provincia,
+        canton: ctxGeo.canton,
+        parroquia: ctxGeo.parroquia,
+        specialSevilla: ctxGeo.specialSevilla,
         now: new Date()
       },
       { infoEl }
@@ -171,356 +197,130 @@ async function buildRoute() {
   drawRoute(getUserLocation(), activePlace, activeMode, infoEl);
 }
 
-/* ================= GEOLOCALIZACIÓN + AUTO-SELECT ================= */
-navigator.geolocation.getCurrentPosition(async pos => {
-  const loc = [pos.coords.latitude, pos.coords.longitude];
-  setUserLocation(loc);
+/* ================= GEOLOCALIZACIÓN (con ubicación de prueba) =================
+   ✅ Para probar: deja USE_TEST_LOCATION=true
+   ✅ Para producción: ponlo en false y listo
+============================================================================= */
+const USE_TEST_LOCATION = true;
+const TEST_LOCATION = [-2.385216, -78.116886];
 
-  map.setView(loc, 14);
-  L.marker(loc).addTo(map).bindPopup("📍 Tu ubicación").openPopup();
+function showLocatingBanner() {
+  extra.innerHTML = `
+    <div class="alert alert-info py-2 mb-2">
+      📡 <b>Estamos ubicándote…</b><br>
+      <small>Esto puede tardar unos segundos.</small>
+    </div>
+  `;
+}
+
+function showDetectedFacade() {
+  extra.innerHTML = `
+    <div class="alert alert-success py-2 mb-2">
+      📍 Ubicación detectada: <b>${detectedAdmin.provincia || "?"}</b> / <b>${detectedAdmin.canton || "?"}</b> / <b>${detectedAdmin.parroquia || "?"}</b>
+      <div class="small mt-1">(Solo informativo)</div>
+    </div>
+  `;
+}
+
+async function detectAdminFromLatLng(loc) {
+  // fallback suave
+  let admin = { provincia: "", canton: "", parroquia: "" };
 
   try {
-    const admin = await reverseGeocodeNominatim(loc[0], loc[1]);
-    const provDetected = titleCaseWords(admin.provincia);
-    const cantonDetected = titleCaseWords(admin.canton);
-    const parroquiaDetected = titleCaseWords(admin.parroquia);
-
-    userProvinciaName = provDetected;
-
-    const provincias = await getProvinciasConDatos();
-    provincia.innerHTML = `<option value="">🏞️ Seleccione provincia</option>`;
-    provincias.forEach(p => (provincia.innerHTML += `<option value="${p}">${p}</option>`));
-
-    if (provDetected && provincias.includes(provDetected)) {
-      provincia.value = provDetected;
-      provincia.disabled = true;
-    } else {
-      extra.innerHTML = `❌ Aún no hay datos para tu provincia: <b>${provDetected || "desconocida"}</b>`;
-      return;
-    }
-
-    const cantones = await getCantonesConDatos(provincia.value);
-    canton.disabled = false;
-    canton.innerHTML = `<option value="">🏙️ Seleccione cantón</option>`;
-    cantones.forEach(c => (canton.innerHTML += `<option value="${c}">${c}</option>`));
-
-    if (cantonDetected && cantones.includes(cantonDetected)) {
-      canton.value = cantonDetected;
-      canton.disabled = true;
-    } else {
-      extra.innerHTML = `❌ Aún no hay datos para tu cantón: <b>${cantonDetected || "desconocido"}</b>`;
-      return;
-    }
-
-    const parroquias = await getParroquiasConDatos(provincia.value, canton.value);
-    parroquia.disabled = false;
-    parroquia.classList.remove("d-none");
-    parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
-    parroquias.forEach(p => (parroquia.innerHTML += `<option value="${p}">${p}</option>`));
-
-    if (parroquiaDetected && parroquias.includes(parroquiaDetected)) parroquia.value = parroquiaDetected;
-
-    category.value = "";
-    category.classList.remove("d-none");
-
-    // ✅ Antes: getDocs(collection(db,"provincias"))
-    // ✅ Ahora: cache
-    const provs = await getCollectionCache("provincias");
-    provs.forEach(p => {
-      const nombre = titleCaseWords(p.Nombre || p.nombre);
-      if (nombre === titleCaseWords(userProvinciaName)) {
-        userProvinciaCode = String(p.codigo || "").trim();
-      }
-    });
-
+    const a = await reverseGeocodeNominatim(loc[0], loc[1]);
+    admin = {
+      provincia: titleCaseWords(a.provincia),
+      canton: titleCaseWords(a.canton),
+      parroquia: titleCaseWords(a.parroquia)
+    };
   } catch (e) {
-    extra.innerHTML = "❌ No se pudo detectar provincia/cantón/parroquia automáticamente.";
-    console.error(e);
+    console.warn("Nominatim falló:", e);
   }
-});
 
-/* ================= EVENTOS SELECTS BASE ================= */
-provincia.onchange = async () => {
-  resetMap();
+  // ✅ Caso especial: Nominatim puede decir Sevilla Don Bosco o algo con Sevilla
+  const anySevilla =
+    normLite(admin.canton).includes("sevilla") ||
+    normLite(admin.parroquia).includes("sevilla");
 
-  canton.disabled = false;
-  canton.innerHTML = `<option value="">🏙️ Seleccione cantón</option>`;
+  if (anySevilla) {
+    detectedAdmin = {
+      provincia: "Morona Santiago",
+      canton: "Sevilla Don Bosco",
+      parroquia: "Sevilla Don Bosco"
+    };
 
-  parroquia.classList.add("d-none");
-  parroquia.disabled = true;
-  parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
+    // lógica: Sevilla se maneja como “parroquia especial” pero puede mostrar Morona también
+    ctxGeo = {
+      provincia: "Morona Santiago",
+      canton: "Sevilla Don Bosco",
+      parroquia: "Sevilla Don Bosco",
+      specialSevilla: true
+    };
+    return;
+  }
 
-  category.value = "";
-  category.classList.add("d-none");
+  detectedAdmin = {
+    provincia: admin.provincia || "",
+    canton: admin.canton || "",
+    parroquia: admin.parroquia || ""
+  };
 
-  extra.innerHTML = "";
+  // lógica normal
+  ctxGeo = {
+    provincia: detectedAdmin.provincia,
+    canton: detectedAdmin.canton,
+    parroquia: detectedAdmin.parroquia,
+    specialSevilla: false
+  };
+}
 
-  const cantones = await getCantonesConDatos(provincia.value);
-  cantones.forEach(c => (canton.innerHTML += `<option value="${c}">${c}</option>`));
-};
+showLocatingBanner();
 
-canton.onchange = async () => {
-  resetMap();
+// ✅ ubicación: prueba o GPS real
+if (USE_TEST_LOCATION) {
+  const loc = TEST_LOCATION;
+  setUserLocation(loc);
 
-  parroquia.disabled = false;
-  parroquia.classList.remove("d-none");
-  parroquia.innerHTML = `<option value="">🏘️ Seleccione parroquia</option>`;
+  map.setView(loc, 13);
+  L.marker(loc).addTo(map).bindPopup("🧪 Ubicación de prueba").openPopup();
 
-  category.value = "";
-  category.classList.add("d-none");
+  await detectAdminFromLatLng(loc);
+  showDetectedFacade();
 
-  extra.innerHTML = "";
+} else {
+  navigator.geolocation.getCurrentPosition(async pos => {
+    const loc = [pos.coords.latitude, pos.coords.longitude];
+    setUserLocation(loc);
 
-  const parroquias = await getParroquiasConDatos(provincia.value, canton.value);
-  parroquias.forEach(p => (parroquia.innerHTML += `<option value="${p}">${p}</option>`));
-};
+    map.setView(loc, 14);
+    L.marker(loc).addTo(map).bindPopup("📍 Tu ubicación").openPopup();
 
-parroquia.onchange = () => {
-  resetMap();
-  category.value = "";
-  category.classList.remove("d-none");
-  extra.innerHTML = "";
-};
+    await detectAdminFromLatLng(loc);
+    showDetectedFacade();
+
+  }, () => {
+    extra.innerHTML = `
+      <div class="alert alert-danger py-2 mb-2">
+        ❌ No se pudo obtener tu ubicación.
+      </div>
+    `;
+  });
+}
 
 /* ================= EVENTO CATEGORÍA ================= */
 category.onchange = async () => {
   resetMap();
-  extra.innerHTML = "";
   dataList.length = 0;
 
   if (!category.value) return;
 
-  /* =========================================================
-     ✅ IR A PROVINCIA / IR A CANTÓN (vía Terminal) con mismos modos
-  ========================================================= */
-  if (category.value === "ir_provincia" || category.value === "ir_canton") {
-    extra.innerHTML = `
-      <div class="mb-2">
-        <label class="form-label small mb-1">${
-          category.value === "ir_provincia" ? "Provincia destino" : "Cantón destino"
-        }</label>
-        <select id="dest_admin" class="form-select">
-          <option value="">Seleccione...</option>
-        </select>
-      </div>
-
-      <div class="mb-2">
-        <label class="form-label small mb-1">Modo de traslado</label>
-        <div class="btn-group w-100">
-          <button class="btn btn-outline-primary active" data-admin-mode="driving">🚗</button>
-          <button class="btn btn-outline-primary" data-admin-mode="walking">🚶</button>
-          <button class="btn btn-outline-primary" data-admin-mode="bicycle">🚴</button>
-          <button class="btn btn-outline-primary" data-admin-mode="motorcycle">🏍️</button>
-          <button class="btn btn-outline-primary" data-admin-mode="bus">🚌</button>
-        </div>
-      </div>
-
-      <div id="admin-route-info" class="small"></div>
-    `;
-
-    const destSel = document.getElementById("dest_admin");
-    const infoEl = document.getElementById("admin-route-info");
-
-    let adminMode = "driving";
-    let targetLL = null; // latlng destino
-
-    // ✅ Índices en memoria para no reconsultar al cambiar destino
-    const provIndex = new Map(); // nombre -> [lat,lng]
-    const cantIndex = new Map(); // nombre -> [lat,lng]
-
-    // ====== cargar destinos ======
-    if (category.value === "ir_provincia") {
-      const provs = await getCollectionCache("provincias");
-      const provNames = [];
-
-      provs.forEach(p => {
-        const n = titleCaseWords(p.Nombre || p.nombre);
-        if (!n) return;
-
-        if (titleCaseWords(n) === titleCaseWords(provincia.value)) return; // excluir provincia actual
-
-        const ub = p.ubicación || p.ubicacion;
-        if (ub?.latitude && ub?.longitude) provIndex.set(n, [ub.latitude, ub.longitude]);
-
-        provNames.push(n);
-      });
-
-      provNames.sort((a, b) => a.localeCompare(b));
-      provNames.forEach(n => (destSel.innerHTML += `<option value="${n}">${n}</option>`));
-
-    } else {
-      const cants = await getCollectionCache("cantones");
-      const cantNames = [];
-
-      cants.forEach(c => {
-        const cp = String(c.codigo_provincia || "").trim().toLowerCase();
-        if (!userProvinciaCode || cp !== String(userProvinciaCode).toLowerCase()) return;
-
-        const n = titleCaseWords(c.nombre || c.Nombre);
-        if (!n) return;
-
-        if (titleCaseWords(n) === titleCaseWords(canton.value)) return; // excluir cantón actual
-
-        const ub = c.ubicación || c.ubicacion;
-        if (ub?.latitude && ub?.longitude) cantIndex.set(n, [ub.latitude, ub.longitude]);
-
-        cantNames.push(n);
-      });
-
-      cantNames.sort((a, b) => a.localeCompare(b));
-      cantNames.forEach(n => (destSel.innerHTML += `<option value="${n}">${n}</option>`));
-    }
-
-    // ====== helper: calcular y pintar (se llama al cambiar destino o modo) ======
-    async function recomputeAdminRoute() {
-      if (!destSel.value || !targetLL) {
-        infoEl.innerHTML = "";
-        return;
-      }
-
-      const userLoc = getUserLocation();
-      if (!userLoc) {
-        infoEl.innerHTML = "❌ No hay ubicación de usuario.";
-        return;
-      }
-
-      // auto = directo al destino
-      if (adminMode === "driving") {
-        clearTransportLayers();
-        clearRoute();
-
-        infoEl.innerHTML = `
-          <div class="alert alert-info py-2 mb-2">
-            📌 Ruta directa al destino (Auto).
-          </div>
-        `;
-
-        const fakePlace = { nombre: destSel.value, ubicacion: { latitude: targetLL[0], longitude: targetLL[1] } };
-        await drawRoute(userLoc, fakePlace, "driving", infoEl);
-        return;
-      }
-
-      // walking/bicycle/motorcycle/bus = vía terminal
-      const terminal = await getUserCantonTerminal();
-      if (!terminal?.ubicacion?.latitude || !terminal?.ubicacion?.longitude) {
-        infoEl.innerHTML = `
-          <div class="alert alert-danger py-2 mb-2">
-            ❌ No hay un <b>Terminal</b> registrado en tu cantón (${canton.value}).
-          </div>
-        `;
-        return;
-      }
-
-      const terminalLL = [terminal.ubicacion.latitude, terminal.ubicacion.longitude];
-
-      showModal(
-        "Transporte interprovincial",
-        `Debes tomar <b>transporte interprovincial</b> desde el <b>Terminal Terrestre</b> del cantón <b>${canton.value}</b>.`
-      );
-
-      clearTransportLayers();
-      clearRoute();
-
-      // BUS: mostrar línea que te deja cerca al terminal
-      if (adminMode === "bus") {
-        infoEl.innerHTML = `
-          <div class="alert alert-info py-2 mb-2">
-            ⏳ Buscando línea en bus hacia el <b>Terminal</b>…
-          </div>
-        `;
-
-        await planAndShowBusStops(
-          userLoc,
-          terminal,
-          {
-            tipo: "urbano",
-            provincia: provincia.value,
-            canton: canton.value,
-            parroquia: parroquia.value,
-            now: new Date()
-          },
-          { infoEl }
-        );
-
-        await drawRouteBetweenPoints({
-          from: terminalLL,
-          to: targetLL,
-          mode: "driving",
-          color: "#0d6efd",
-          dash: false
-        });
-
-        infoEl.innerHTML += `
-          <div class="mt-2">
-            <b>Tramo 2</b>: Terminal → ${destSel.value}<br>
-            <small>* Ruta referencial (aprox.).</small>
-          </div>
-        `;
-
-        map.fitBounds(L.latLngBounds([userLoc, terminalLL, targetLL]).pad(0.2));
-        return;
-      }
-
-      const osrmMode = (adminMode === "motorcycle") ? "driving" : adminMode;
-
-      await drawTwoLegOSRM({
-        userLoc,
-        terminalLoc: terminalLL,
-        targetLoc: targetLL,
-        mode: osrmMode,
-        // Nota: tus funciones aceptan colores; si quieres 0 cambios visuales,
-        // puedes mantenerlos igual que antes o quitar estos campos si no son necesarios.
-        color1: "#6c757d",
-        color2: "#0d6efd",
-        infoBox: infoEl,
-        title: `Ruta vía Terminal → ${destSel.value}`
-      });
-
-      infoEl.innerHTML += `<div class="small mt-1">* Ruta referencial (aprox.).</div>`;
-    }
-
-    // ====== cuando elige destino: resolver ubicación SIN consultas ======
-    destSel.onchange = async () => {
-      const name = destSel.value;
-      targetLL = null;
-
-      if (!name) {
-        infoEl.innerHTML = "";
-        return;
-      }
-
-      if (category.value === "ir_provincia") {
-        targetLL = provIndex.get(name) || null;
-      } else {
-        targetLL = cantIndex.get(name) || null;
-      }
-
-      if (!targetLL) {
-        infoEl.innerHTML = `❌ El destino seleccionado no tiene ubicación registrada.`;
-        return;
-      }
-
-      await recomputeAdminRoute();
-    };
-
-    // ====== al cambiar modo: recalcular ======
-    extra.querySelectorAll("[data-admin-mode]").forEach(btn => {
-      btn.onclick = async () => {
-        adminMode = btn.dataset.adminMode || "driving";
-        extra.querySelectorAll("[data-admin-mode]").forEach(b => b.classList.remove("active"));
-        btn.classList.add("active");
-        await recomputeAdminRoute();
-      };
-    });
-
-    return;
-  }
+  // debug fachada y lógica
+  console.log("📍 Fachada:", detectedAdmin);
+  console.log("🧠 ctxGeo (lógico):", ctxGeo);
 
   /* ===== LÍNEAS DE TRANSPORTE ===== */
   if (category.value === "transporte_lineas") {
     extra.innerHTML = `
-      <div id="lineas-status" class="small mb-2"></div>
-
       <select id="tipo" class="form-select mb-2">
         <option value="">🚍 Tipo de transporte</option>
         <option value="urbano">Urbano</option>
@@ -532,43 +332,52 @@ category.onchange = async () => {
 
     const tipoSel = document.getElementById("tipo");
     const lineasContainer = document.getElementById("lineas");
-    const statusEl = document.getElementById("lineas-status");
 
     tipoSel.onchange = async e => {
       const tipo = e.target.value;
       lineasContainer.innerHTML = "";
-      if (statusEl) statusEl.innerHTML = "";
       if (!tipo) return;
 
-      const ctxGeo = { canton: canton.value, parroquia: parroquia.value };
-      const allLineas = await getLineasByTipoAll(tipo, ctxGeo);
       const now = new Date();
 
+      // ✅ para rural: Sevilla => trae todas
+      const allLineas = await getLineasByTipoAll(tipo, {
+        provincia: ctxGeo.provincia,
+        canton: ctxGeo.canton,
+        parroquia: ctxGeo.parroquia,
+        ignoreGeoFilter: (tipo === "rural" && ctxGeo.specialSevilla)
+      });
+
+      // ✅ “fuera de servicio” como POPUP (no en panel)
       const fuera = allLineas
         .filter(l => !isLineOperatingNow(l, now))
         .sort((a, b) => (Number(a.orden) || 0) - (Number(b.orden) || 0));
 
-      if (statusEl) {
-        if (!allLineas.length) statusEl.innerHTML = `❌ No hay líneas registradas para esta zona.`;
-        else if (!fuera.length) statusEl.innerHTML = `✅ Todas las líneas están operativas ahora.`;
-        else {
-          const hh = String(now.getHours()).padStart(2, "0");
-          const mm = String(now.getMinutes()).padStart(2, "0");
-          const items = fuera.map(l => `• <b>${l.codigo}</b> ${l.nombre ? `- ${l.nombre}` : ""}`).join("<br>");
-          statusEl.innerHTML = `
+      if (fuera.length) {
+        const hh = String(now.getHours()).padStart(2, "0");
+        const mm = String(now.getMinutes()).padStart(2, "0");
+        const items = fuera
+          .map(l => `• <b>${l.codigo}</b> - ${l.nombre || ""}`)
+          .join("<br>");
+
+        showModal(
+          "⛔ Fuera de servicio ahora",
+          `
             <div class="alert alert-warning py-2 mb-2">
-              ⛔ <b>Fuera de servicio ahora</b> (hora actual ${hh}:${mm}):
-              <div class="mt-1">${items}</div>
+              <b>Fuera de servicio ahora</b> (hora actual ${hh}:${mm}):<br><br>
+              ${items}
               <div class="small mt-2">* Horarios referenciales (aprox.).</div>
             </div>
-          `;
-        }
+          `
+        );
       }
 
-      cargarLineasTransporte(tipo, lineasContainer, {
-        provincia: provincia.value,
-        canton: canton.value,
-        parroquia: parroquia.value,
+      await cargarLineasTransporte(tipo, lineasContainer, {
+        provincia: ctxGeo.provincia,
+        canton: ctxGeo.canton,
+        parroquia: ctxGeo.parroquia,
+        specialSevilla: ctxGeo.specialSevilla,
+        ignoreGeoFilter: (tipo === "rural" && ctxGeo.specialSevilla),
         now
       });
     };
@@ -576,39 +385,70 @@ category.onchange = async () => {
     return;
   }
 
-  /* ===== LUGARES POR CATEGORÍA (todo el cantón, prioridad parroquia) ===== */
-  // ✅ Antes: getDocs(collection(db,"lugar")) en cada cambio de categoría
-  // ✅ Ahora: 1 sola carga por sesión y filtrar en JS
+  /* ===== LUGARES POR CATEGORÍA ===== */
   const lugares = await getCollectionCache("lugar");
   const all = [];
 
-  const provSel = provincia.value;
-  const cantonSel = canton.value;
+  const provSel = ctxGeo.provincia;
+  const cantonSel = ctxGeo.canton;
+  const parroquiaSel = ctxGeo.parroquia;
   const catSel = String(category.value || "").toLowerCase();
-  const parroquiaSel = parroquia.value;
 
-  lugares.forEach(l => {
-    if (!l?.activo) return;
-    if (l.provincia !== provSel) return;
-    if (l.ciudad !== cantonSel) return;
-    if (String(l.subcategoria || "").toLowerCase() !== catSel) return;
-    all.push(l);
+  // ✅ filtro base por provincia + subcategoria
+  const base = lugares.filter(l => {
+    if (!l?.activo) return false;
+    if (String(l.provincia || "") !== String(provSel || "")) return false;
+    if (String(l.subcategoria || "").toLowerCase() !== catSel) return false;
+    return true;
   });
 
+  // ✅ caso Sevilla: mostrar Sevilla Don Bosco + Morona
+  // ciudad == cantón
+  if (ctxGeo.specialSevilla) {
+    base.forEach(l => {
+      const ciudad = String(l.ciudad || "");
+      if (ciudad === "Sevilla Don Bosco" || ciudad === "Morona") all.push(l);
+    });
+  } else {
+    base.forEach(l => {
+      const ciudad = String(l.ciudad || "");
+      if (ciudad === cantonSel) all.push(l);
+    });
+  }
+
+  // ✅ debug en consola
+  console.log(`📦 Lugares obtenidos (${catSel}):`, all);
+
   if (!all.length) {
-    extra.innerHTML = `
-      <div class="alert alert-info py-2 mb-2">
-        ❌ No hay lugares en esta categoría.
-        <br>Muy pronto estará disponible para tu zona.
-      </div>
-    `;
+    showModal(
+      "Sin datos",
+      `
+        <div class="alert alert-info py-2 mb-0">
+          ❌ No hay lugares registrados en la BD para:<br>
+          <b>${provSel || "?"}</b> / <b>${cantonSel || "?"}</b> / <b>${parroquiaSel || "(sin parroquia detectada)"}</b><br>
+          <div class="small mt-2">* Si Nominatim no detecta parroquia, se muestra por cantón.</div>
+        </div>
+      `
+    );
+    extra.innerHTML = "";
     return;
   }
 
+  // ✅ ordenar: prioridad parroquia (si existe), y Sevilla primero si special
   all.sort((a, b) => {
+    const aCity = String(a.ciudad || "");
+    const bCity = String(b.ciudad || "");
+
+    if (ctxGeo.specialSevilla) {
+      const aKey = (aCity === "Sevilla Don Bosco") ? 0 : 1;
+      const bKey = (bCity === "Sevilla Don Bosco") ? 0 : 1;
+      if (aKey !== bKey) return aKey - bKey;
+    }
+
     const aPar = String(a.parroquia || "");
     const bPar = String(b.parroquia || "");
 
+    // si Nominatim no dio parroquia, no priorizamos
     if (parroquiaSel) {
       const aKey = (aPar === parroquiaSel) ? 0 : 1;
       const bKey = (bPar === parroquiaSel) ? 0 : 1;
@@ -645,8 +485,8 @@ category.onchange = async () => {
 
   const sel = document.getElementById("lugares");
   dataList.forEach((l, i) => {
-    const ptxt = l.parroquia ? ` (Parroquia: ${l.parroquia})` : "";
-    sel.innerHTML += `<option value="${i}">${l.nombre || "Lugar"}${ptxt}</option>`;
+    const par = l.parroquia ? `(${l.parroquia})` : "(sin parroquia)";
+    sel.innerHTML += `<option value="${i}">${l.nombre || "Lugar"} ${par}</option>`;
   });
 
   renderMarkers(dataList, place => {
@@ -676,3 +516,9 @@ category.onchange = async () => {
     };
   });
 };
+function enableCategoryUI() {
+  if (!category) return;
+  category.disabled = false;
+  category.classList.remove("d-none");   // <-- clave
+  category.value = "";                  // reset
+}
