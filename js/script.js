@@ -201,8 +201,8 @@ async function buildRoute() {
    ✅ Para probar: deja USE_TEST_LOCATION=true
    ✅ Para producción: ponlo en false y listo
 ============================================================================= */
-const USE_TEST_LOCATION = true;
-const TEST_LOCATION = [-2.385216, -78.116886];
+const USE_TEST_LOCATION = false;
+const TEST_LOCATION = [-2.385050, -78.115910];
 
 function showLocatingBanner() {
   extra.innerHTML = `
@@ -213,13 +213,42 @@ function showLocatingBanner() {
   `;
 }
 
-function showDetectedFacade() {
-  extra.innerHTML = `
-    <div class="alert alert-success py-2 mb-2">
-      📍 Ubicación detectada: <b>${detectedAdmin.provincia || "?"}</b> / <b>${detectedAdmin.canton || "?"}</b> / <b>${detectedAdmin.parroquia || "?"}</b>
-      <div class="small mt-1">(Solo informativo)</div>
-    </div>
-  `;
+
+
+if (USE_TEST_LOCATION) {
+  const loc = TEST_LOCATION;
+  setUserLocation(loc);
+
+  map.setView(loc, 13);
+  L.marker(loc).addTo(map).bindPopup("🧪 Ubicación de prueba").openPopup();
+
+  await detectAdminFromLatLng(loc);
+  showDetectedFacade();
+
+  // ✅ AÑADE ESTA LÍNEA
+  enableCategoryUI();
+
+} else {
+  navigator.geolocation.getCurrentPosition(async pos => {
+    const loc = [pos.coords.latitude, pos.coords.longitude];
+    setUserLocation(loc);
+
+    map.setView(loc, 14);
+    L.marker(loc).addTo(map).bindPopup("📍 Tu ubicación").openPopup();
+
+    await detectAdminFromLatLng(loc);
+    showDetectedFacade();
+
+    // ✅ AÑADE ESTA LÍNEA
+    enableCategoryUI();
+
+  }, () => {
+    extra.innerHTML = `
+      <div class="alert alert-danger py-2 mb-2">
+        ❌ No se pudo obtener tu ubicación.
+      </div>
+    `;
+  });
 }
 
 async function detectAdminFromLatLng(loc) {

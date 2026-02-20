@@ -5,7 +5,8 @@ import { getCollectionCache } from "../../app/cache_db.js";
 import {
   getLineasByTipo,
   getParadasByLinea,
-  normStr
+  normStr,
+  normKey
 } from "./transport_data.js";
 
 import { planLineBoardAlightByOrder } from "./transport_bus_planner.js";
@@ -40,6 +41,47 @@ const CFG = {
 /* =========================
    HELPERS
 ========================= */
+function normLite(s) {
+  // ✅ robusto: quita tildes y normaliza espacios
+  return normKey(s);
+}
+
+function includesKey(haystack, needle) {
+  const h = normLite(haystack);
+  const n = normLite(needle);
+  if (!h || !n) return false;
+  return h.includes(n);
+}
+
+function isProanoOrRioBlanco(ctx = {}, destPlace = {}) {
+  const p1 = normLite(ctx?.parroquia);
+  const p2 = normLite(destPlace?.parroquia);
+  const c1 = normLite(ctx?.canton);
+  const c2 = normLite(destPlace?.canton || destPlace?.ciudad);
+
+  const hayProano =
+    (p1.includes("proano") || p2.includes("proano") || c1.includes("proano") || c2.includes("proano"));
+
+  const hayRioBlanco =
+    (p1.includes("rio blanco") || p2.includes("rio blanco") || c1.includes("rio blanco") || c2.includes("rio blanco"));
+
+  return hayProano || hayRioBlanco;
+}
+
+function isMacasContext(ctx = {}, destPlace = {}) {
+  // Tu proyecto mezcla "Morona/Macas" según BD. Aceptamos ambos.
+  const c1 = normLite(ctx?.canton);
+  const c2 = normLite(destPlace?.canton || destPlace?.ciudad);
+  const p1 = normLite(ctx?.parroquia);
+  const p2 = normLite(destPlace?.parroquia);
+
+  return (
+    c1.includes("macas") || c2.includes("macas") ||
+    p1.includes("macas") || p2.includes("macas") ||
+    c1.includes("morona") || c2.includes("morona")
+  );
+}
+
 function llFromStop(p) {
   const u = p?.ubicacion;
   const { latitude, longitude } = u || {};
@@ -69,7 +111,6 @@ function nearestKStops(stops, point, k = 15) {
 function scoreFromWalkAndStops({ walk_m, transfers = 0, stopsCount = 0 }) {
   const walkMin = walk_m * CFG.SCORE.WALK_M_TO_MIN;
   const transferMin = transfers * CFG.SCORE.TRANSFER_PENALTY_MIN;
-  // stopsCount ya viene ponderado dentro del planLineBoardAlightByOrder, pero aquí ayuda a desempatar
   return walkMin + transferMin + (stopsCount * 0.05);
 }
 
@@ -97,60 +138,57 @@ function makeDirectPlan({ tipo, linea, plan, walkExtra = 0 }) {
   };
 }
 
-function makeTransferPlan({
-  first,   // { tipo,linea,plan }
-  second,  // { tipo,linea,plan }
-  transferWalk_m = 0,
-  firstToTransferWalk_m = 0,
-  transferToDestWalk_m = 0
-}) {
-  const w1 = (first.plan?.metrics?.walk1 || 0);
-  const w2 = (first.plan?.metrics?.walk2 || 0);
-  const w3 = (second.plan?.metrics?.walk1 || 0);
-  const w4 = (second.plan?.metrics?.walk2 || 0);
+/* =========================
+   STOP SETS PARA TRASBORDO
+========================= */
+async function getUrbanoStopsAll() {
+  const all = await getCollectionCache("paradas_transporte");
+  return (Array.isArray(all) ? all : [])
+    .filter(p => p?.activo && normStr(p?.tipo) === "urbana");
+}
 
-  const walk_m = w1 + w2 + transferWalk_m + w3 + w4 + firstToTransferWalk_m + transferToDestWalk_m;
+async function getRuralStopsAll() {
+  const all = await getCollectionCache("paradas_rurales");
+  return (Array.isArray(all) ? all : [])
+    .filter(p => p?.activo && normStr(p?.tipo) === "rural");
+}
 
-  const stopsCount =
-    (first.plan?.metrics?.stopsCount || 0) +
-    (second.plan?.metrics?.stopsCount || 0);
+/**
+ * ✅ “Paradas fijas de Macas”
+ * - Macas/Morona (por ciudad/parroquia)
+ * - NO referencial (si existe)
+ * - si existe uso => solo "fija"
+ */
+function isFixedMacasStop(p) {
+  const ciudad = normLite(p?.ciudad);
+  const parroquia = normLite(p?.parroquia);
 
-  return {
-    type: "transfer",
-    transfers: 1,
-    legs: [
-      {
-        kind: "bus",
-        tipo: first.tipo,
-        linea: first.linea,
-        boardStop: first.plan.boardStop,
-        alightStop: first.plan.alightStop,
-        pathStops: first.plan.pathStops || []
-      },
-      {
-        kind: "walk-transfer",
-        meters: transferWalk_m
-      },
-      {
-        kind: "bus",
-        tipo: second.tipo,
-        linea: second.linea,
-        boardStop: second.plan.boardStop,
-        alightStop: second.plan.alightStop,
-        pathStops: second.plan.pathStops || []
-      }
-    ],
-    metrics: { walk_m, stopsCount, transferWalk_m },
-    score: scoreFromWalkAndStops({ walk_m, transfers: 1, stopsCount })
-  };
+  const esMacas =
+    ciudad.includes("macas") ||
+    parroquia.includes("macas") ||
+    ciudad.includes("morona");
+
+  if (!esMacas) return false;
+
+  // si existe referencial y es true => NO es fija
+  if (p?.referencial === true) return false;
+
+  // si existe uso: "fija" => sí (si existe y no es fija => no)
+  const uso = normLite(p?.uso);
+  if (uso) return uso === "fija";
+
+  // si no hay "uso", aceptamos
+  return true;
 }
 
 /* =========================
    PLANNERS DIRECTOS
 ========================= */
-async function bestUrbanoDirect(userLoc, destLoc, ctx) {
+async function bestUrbanoDirect(userLoc, destLoc, ctx, opts = {}) {
   const lineas = await getLineasByTipo("urbano", ctx);
   if (!lineas?.length) return null;
+
+  const allowedLineCodes = opts?.allowedLineCodes instanceof Set ? opts.allowedLineCodes : null;
 
   // mismos parámetros base del urbano_controller (respetando “circulación”)
   const BOARD_STEPS = [150, 250, 350, 450, 650, 800, 1000, 1200];
@@ -168,13 +206,14 @@ async function bestUrbanoDirect(userLoc, destLoc, ctx) {
     let levelBest = null;
 
     for (const linea of lineas) {
+      const code = normStr(linea?.codigo);
+      if (allowedLineCodes && !allowedLineCodes.has(code)) continue;
+
       const paradasAll = await getParadasByLinea(linea.codigo, ctx);
       if (!paradasAll?.length) continue;
 
       const origen = String(linea?.origen || "").toLowerCase();
-      const codigo = normStr(linea.codigo);
-
-      const isCirculacion = (origen === "circulacion" || codigo === "l1" || codigo === "l2");
+      const isCirculacion = (origen === "circulacion" || code === "l1" || code === "l2");
       const W = isCirculacion ? CIRC : BASE;
 
       const plan = planLineBoardAlightByOrder({
@@ -197,7 +236,6 @@ async function bestUrbanoDirect(userLoc, destLoc, ctx) {
 
       if (!plan) continue;
 
-      // preferimos alight cerca del destino cuando hay empate
       const cand = makeDirectPlan({ tipo: "urbano", linea, plan });
       if (!levelBest || cand.score < levelBest.score) levelBest = cand;
     }
@@ -211,15 +249,6 @@ async function bestUrbanoDirect(userLoc, destLoc, ctx) {
   return best;
 }
 
-async function getOrderedStopsRuralForPlanner(lineaCodigo, ctx, sentidoSel = "ida") {
-  // tomamos la lógica exacta de rural_controller: orden por prefijos + corte finderuta
-  // para no duplicar lógica aquí, reutilizamos directamente lo que ya haces en rural_controller
-  // => lo resolvemos con una función exportada (ver patch rural_controller más abajo).
-  //
-  // Este módulo la importará desde rural_controller para no duplicar.
-  return null;
-}
-
 async function bestRuralDirect(userLoc, destLoc, ctx, ruralHelpers) {
   const lineas = await getLineasByTipo("rural", ctx);
   if (!lineas?.length) return null;
@@ -227,7 +256,6 @@ async function bestRuralDirect(userLoc, destLoc, ctx, ruralHelpers) {
   const BOARD_STEPS = [350, 550, 800, 1100, 1400, 1800];
   const DEST_STEPS  = [350, 550, 800, 1100, 1400];
 
-  // pesos un poco más “tolerantes” en rural
   const W = { wWalk1: 1.1, wWalk2: 1.4, wBus: 1.0, wStops: 22 };
 
   let best = null;
@@ -239,12 +267,10 @@ async function bestRuralDirect(userLoc, destLoc, ctx, ruralHelpers) {
     let levelBest = null;
 
     for (const linea of lineas) {
-      // probamos dos sentidos: ida y vuelta
       for (const sentido of ["ida", "vuelta"]) {
         const orderedAll = await ruralHelpers.getOrderedStops(linea, ctx, sentido);
         if (!orderedAll?.length) continue;
 
-        // para SUBIR/BAJAR: solo paradas “parada”
         const stopsPlanner = orderedAll.filter(isRuralVisibleStop);
         if (stopsPlanner.length < 2) continue;
 
@@ -284,41 +310,53 @@ async function bestRuralDirect(userLoc, destLoc, ctx, ruralHelpers) {
 }
 
 /* =========================
-   STOP SETS PARA TRASBORDO
-========================= */
-async function getUrbanoStopsAll() {
-  const all = await getCollectionCache("paradas_transporte");
-  return (Array.isArray(all) ? all : [])
-    .filter(p => p?.activo && normStr(p?.tipo) === "urbana");
-}
-
-async function getRuralStopsAll() {
-  const all = await getCollectionCache("paradas_rurales");
-  return (Array.isArray(all) ? all : [])
-    .filter(p => p?.activo && normStr(p?.tipo) === "rural");
-}
-
-/* =========================
    MULTIMODAL (1 trasbordo)
+   ✅ Regla: transbordo urbano SOLO L1↔L2
+   ✅ Caso Proaño/Río Blanco: urbano SOLO L5
+   ✅ Caso Macas: usar paradas fijas de Macas como targets de transferencia
+   ✅ Prioriza terminales como target de transferencia
 ========================= */
-async function bestTransfer_RuralToUrbano(userLoc, destLoc, ctx, ruralHelpers) {
+function getAllowedUrbanoForTransfer(ctx, destPlace) {
+  if (isProanoOrRioBlanco(ctx, destPlace)) return new Set(["l5"]);
+  return new Set(["l1", "l2"]);
+}
+
+function prioritizeTerminalFirst(cands) {
+  // ✅ terminales primero, sin excluir los demás
+  const a = [];
+  const b = [];
+  for (const x of (cands || [])) {
+    if (x?.stop?.es_terminal === true) a.push(x);
+    else b.push(x);
+  }
+  return [...a, ...b];
+}
+
+async function bestTransfer_RuralToUrbano(userLoc, destLoc, ctx, ruralHelpers, destPlace) {
   const urbanoStops = await getUrbanoStopsAll();
-  const candidates = nearestKStops(urbanoStops, destLoc, CFG.K_TRANSFER_STOPS)
+
+  // ✅ si el contexto es Macas, preferimos transfer targets en “paradas fijas Macas”
+  let pool = urbanoStops;
+  if (isMacasContext(ctx, destPlace)) {
+    const fixed = urbanoStops.filter(isFixedMacasStop);
+    // ✅ fallback si quedó vacío
+    if (fixed.length) pool = fixed;
+  }
+
+  let candidates = nearestKStops(pool, destLoc, CFG.K_TRANSFER_STOPS)
     .filter(x => x.d <= 1600);
+
+  candidates = prioritizeTerminalFirst(candidates);
 
   if (!candidates.length) return null;
 
-  const urbanoLineas = await getLineasByTipo("urbano", ctx);
-  if (!urbanoLineas?.length) return null;
+  const allowedUrb = getAllowedUrbanoForTransfer(ctx, destPlace);
 
-  // 1) para cada parada urbana cerca del destino, intentamos:
-  //    rural (usuario -> cerca de esa parada) + caminata transferencia + urbano (esa parada -> destino)
   let best = null;
 
   for (const u of candidates) {
     const transferTarget = u.ll;
 
-    // rural leg hacia “transferTarget”
     const ruralLeg = await bestRuralDirect(userLoc, transferTarget, ctx, ruralHelpers);
     if (!ruralLeg) continue;
 
@@ -328,20 +366,9 @@ async function bestTransfer_RuralToUrbano(userLoc, destLoc, ctx, ruralHelpers) {
     const transferWalk = dist(ruralAlightLL, transferTarget);
     if (transferWalk > CFG.TRANSFER_MAX_M) continue;
 
-    // urbano leg desde transferTarget hacia destino:
-    // lo tratamos como userLoc=transferTarget para planner urbano directo.
-    const urbanoLeg = await bestUrbanoDirect(transferTarget, destLoc, ctx);
+    const urbanoLeg = await bestUrbanoDirect(transferTarget, destLoc, ctx, { allowedLineCodes: allowedUrb });
     if (!urbanoLeg) continue;
 
-    const cand = makeTransferPlan({
-      first: { tipo: "rural", linea: ruralLeg.linea, plan: ruralLeg.legs[0] ? { ...ruralLeg.legs[0], ...ruralLeg.legs[0] } : null },
-      second: { tipo: "urbano", linea: urbanoLeg.linea, plan: urbanoLeg.legs[0] ? { ...urbanoLeg.legs[0], ...urbanoLeg.legs[0] } : null },
-      transferWalk_m: transferWalk
-    });
-
-    // Ajuste real: makeTransferPlan necesita “plan” en el formato de planLineBoard...:
-    // aquí simplificamos: mejor construimos una estructura manual abajo.
-    // Para no enredar, devolvemos un objeto directo:
     const plan = {
       type: "transfer",
       transfers: 1,
@@ -368,19 +395,22 @@ async function bestTransfer_RuralToUrbano(userLoc, destLoc, ctx, ruralHelpers) {
   return best;
 }
 
-async function bestTransfer_UrbanoToRural(userLoc, destLoc, ctx, ruralHelpers) {
+async function bestTransfer_UrbanoToRural(userLoc, destLoc, ctx, ruralHelpers, destPlace) {
   const ruralStops = (await getRuralStopsAll()).filter(isRuralVisibleStop);
-  const candidates = nearestKStops(ruralStops, destLoc, CFG.K_TRANSFER_STOPS)
+  let candidates = nearestKStops(ruralStops, destLoc, CFG.K_TRANSFER_STOPS)
     .filter(x => x.d <= 2200);
 
+  // (para urbano->rural, los candidates son rurales, no hay es_terminal urbano aquí)
   if (!candidates.length) return null;
+
+  const allowedUrb = getAllowedUrbanoForTransfer(ctx, destPlace);
 
   let best = null;
 
   for (const r of candidates) {
     const transferTarget = r.ll;
 
-    const urbanoLeg = await bestUrbanoDirect(userLoc, transferTarget, ctx);
+    const urbanoLeg = await bestUrbanoDirect(userLoc, transferTarget, ctx, { allowedLineCodes: allowedUrb });
     if (!urbanoLeg) continue;
 
     const urbanoAlightLL = llFromStop(urbanoLeg.legs[0].alightStop);
@@ -420,28 +450,31 @@ async function bestTransfer_UrbanoToRural(userLoc, destLoc, ctx, ruralHelpers) {
 
 /* =========================
    API PRINCIPAL
+   ✅ Proaño/Río Blanco => urbano solo L5 (directo o transfer)
 ========================= */
 export async function planBestBusTrip({ userLoc, destPlace, ctx = {}, ruralHelpers }) {
   if (!userLoc || !destPlace?.ubicacion) return null;
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
 
+  const onlyL5 = isProanoOrRioBlanco(ctx, destPlace);
+  const urbAllowedDirect = onlyL5 ? new Set(["l5"]) : null;
+
   // 1) Directos
-  const urbano = await bestUrbanoDirect(userLoc, destLoc, ctx);
+  const urbano = await bestUrbanoDirect(userLoc, destLoc, ctx, { allowedLineCodes: urbAllowedDirect });
   const rural  = await bestRuralDirect(userLoc, destLoc, ctx, ruralHelpers);
 
   let best = null;
   if (urbano) best = urbano;
   if (rural && (!best || rural.score < best.score)) best = rural;
 
-  // si el mejor directo deja razonablemente cerca, lo aceptamos
   if (best?.type === "direct") {
     const alightLL = llFromStop(best.legs[0].alightStop);
     if (alightLL && dist(alightLL, destLoc) <= CFG.NEAR_DEST_M) return best;
   }
 
-  // 2) Trasbordos (1)
-  const t1 = await bestTransfer_RuralToUrbano(userLoc, destLoc, ctx, ruralHelpers);
-  const t2 = await bestTransfer_UrbanoToRural(userLoc, destLoc, ctx, ruralHelpers);
+  // 2) Trasbordos (1) con restricciones
+  const t1 = await bestTransfer_RuralToUrbano(userLoc, destLoc, ctx, ruralHelpers, destPlace);
+  const t2 = await bestTransfer_UrbanoToRural(userLoc, destLoc, ctx, ruralHelpers, destPlace);
 
   if (t1 && (!best || t1.score < best.score)) best = t1;
   if (t2 && (!best || t2.score < best.score)) best = t2;

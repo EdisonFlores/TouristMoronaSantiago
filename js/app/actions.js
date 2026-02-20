@@ -1,12 +1,13 @@
 // js/app/actions.js
 import { setActivePlace, getUserLocation, setMode } from "./state.js";
-import { drawRoute, clearMarkers, renderMarkers } from "../map/map.js";
-import { planAndShowBusStops } from "../transport/transport_controller.js";
+import { drawRoute, clearMarkers, renderMarkers, clearRoute } from "../map/map.js";
+import { clearTransportLayers, planAndShowBusStops } from "../transport/transport_controller.js";
 
 /* =========================
    Seleccionar un lugar
+   ✅ ahora recibe ctxGeo (del usuario)
 ========================= */
-export function selectPlace(place, infoBox) {
+export function selectPlace(place, infoBox, ctxGeo = {}) {
   if (!place) return;
 
   setActivePlace(place);
@@ -39,31 +40,54 @@ export function selectPlace(place, infoBox) {
       setMode(mode);
 
       const infoEl = document.getElementById("route-info");
-      if (infoEl) infoEl.innerHTML = ""; // ✅ limpia antes de pintar algo nuevo
+      if (infoEl) infoEl.innerHTML = "";
 
-      if (mode === "bus") {
-        const userLoc = getUserLocation();
+      // ✅ limpiar antes de redibujar
+      clearRoute();
+      clearTransportLayers();
 
-        // ✅ ctx CORRECTO para filtrar lineas por cantonpasa / ciudadpasa
-        // - canton: cantón del lugar (en tu BD "ciudad" suele ser el cantón en lugar)
-        // - parroquia: parroquia real del lugar destino
-        // Si en tu BD el cantón está en `place.ciudad`, usamos ese fallback.
-        const ctx = {
-          tipo: "urbano",
-          canton: place.canton || place.ciudad || "",
-          parroquia: place.parroquia || ""
-        };
+     if (mode === "bus") {
+  const userLoc = getUserLocation();
 
-        await planAndShowBusStops(userLoc, place, ctx, { infoEl });
-        return;
-      }
+  // ✅ Si NO estamos en "Líneas de transporte", bus = ruta normal (OSRM)
+  if (!isTransportCategoryActive()) {
+    drawRoute(userLoc, place, "bus", infoEl);
+    return;
+  }
+
+  // ✅ Si SÍ estamos en "Líneas de transporte", entonces sí usar planner (urbano/rural)
+  const ctx = {
+    tipo: "auto",
+    provincia: ctxGeo.provincia || "",
+    canton: ctxGeo.canton || "",
+    parroquia: ctxGeo.parroquia || "",
+    specialSevilla: ctxGeo.specialSevilla === true,
+    now: new Date()
+  };
+
+  await planAndShowBusStops(userLoc, place, ctx, { infoEl });
+  return;
+}
 
       // otros modos: OSRM normal
       drawRoute(getUserLocation(), place, mode, infoEl);
     };
   });
 }
+function isTransportCategoryActive() {
+  // intenta detectar el select de categoría
+  const el =
+    document.getElementById("category") ||
+    document.getElementById("select-category") ||
+    document.querySelector('select[name="category"]');
 
+  const v = String(el?.value || el?.options?.[el?.selectedIndex]?.text || "")
+    .toLowerCase()
+    .trim();
+
+  // ajusta si tu value es distinto, pero esto cubre "Líneas de transporte"
+  return v.includes("lineas") || v.includes("líneas") || v.includes("transporte");
+}
 /* =========================
    Encontrar el lugar más cercano
 ========================= */

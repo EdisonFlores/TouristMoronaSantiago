@@ -3,13 +3,23 @@ import { map } from "../../map/map.js";
 import { setAccessLayer, getAccessLayer } from "./transport_state.js";
 
 /* =====================================================
-   DASHED usuario -> parada (OSRM)
+   DASHED usuario -> punto/parada (OSRM)
+   ✅ FIX: permitir 2+ dashed sin borrar el anterior
 ===================================================== */
 export async function drawDashedAccessRoute(userLoc, stopLatLng, color = "#444") {
-  const prev = getAccessLayer();
-  if (prev) {
-    map.removeLayer(prev);
-    setAccessLayer(null);
+  let layer = getAccessLayer();
+
+  // ✅ si no existe, creamos un LayerGroup para acumular dashed
+  if (!layer) {
+    layer = L.layerGroup().addTo(map);
+    setAccessLayer(layer);
+  }
+
+  // ✅ si por alguna razón era un polyline antiguo, lo envolvemos
+  if (layer && typeof layer.addLayer !== "function") {
+    try { map.removeLayer(layer); } catch {}
+    layer = L.layerGroup().addTo(map);
+    setAccessLayer(layer);
   }
 
   const profile = "foot";
@@ -21,20 +31,22 @@ export async function drawDashedAccessRoute(userLoc, stopLatLng, color = "#444")
   try {
     const res = await fetch(url);
     const data = await res.json();
-    if (!data.routes?.length) return;
+    if (!data.routes?.length) return null;
 
     const route = data.routes[0];
 
-    const layer = L.polyline(route.geometry.coordinates.map(c => [c[1], c[0]]), {
+    const poly = L.polyline(route.geometry.coordinates.map(c => [c[1], c[0]]), {
       color,
       weight: 4,
       dashArray: "8,10",
       opacity: 0.9,
-    }).addTo(map);
+    });
 
-    setAccessLayer(layer);
+    layer.addLayer(poly);
+    return poly;
   } catch (e) {
     console.error("Error OSRM acceso:", e);
+    return null;
   }
 }
 
@@ -64,11 +76,6 @@ async function fetchOSRMRouteChunk(latlngs, profile = "car") {
   };
 }
 
-/**
- * ✅ Versión rápida (urbano-friendly):
- * - 1 request por chunk (hasta 99 puntos)
- * - anti-loop simple por chunk corto
- */
 export async function drawLineRouteFollowingStreets(latlngs, color = "#000") {
   if (!latlngs || latlngs.length < 2) return null;
 
@@ -105,7 +112,6 @@ export async function drawLineRouteFollowingStreets(latlngs, color = "#000") {
 
     // anti-loop chunk (solo para chunks cortos)
     const isWeird = straight > 0 && straight <= 450 && osrmDist > straight * 2.2;
-
     const geom = isWeird ? points : r.coords;
 
     if (full.length && geom.length) geom.shift();

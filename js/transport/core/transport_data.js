@@ -74,7 +74,7 @@ function parseRangeES(s) {
   return { start: a, end: b };
 }
 
-// ✅ "05:22 a 20:52" / "05:22 - 20:52" / "05:22 – 20:52"
+// "05:22 a 20:52" / "05:22 - 20:52" / "05:22 – 20:52"
 function parseRangeAny(s) {
   const t = String(s || "").trim();
   const m = t.match(/(\d{1,2}:\d{2})\s*(?:a|-|–)\s*(\d{1,2}:\d{2})/i);
@@ -85,7 +85,7 @@ function parseRangeAny(s) {
   return { start, end };
 }
 
-// ✅ "15 a 30 minutos" / "15-30" / "15 min"
+// "15 a 30 minutos" / "15-30" / "15 min"
 function parseFreqRange(s) {
   const t = String(s || "").toLowerCase();
   const nums = t.match(/\d+/g)?.map(Number).filter(n => Number.isFinite(n)) || [];
@@ -145,13 +145,13 @@ function isOperatingTodayByDias(linea, now = new Date()) {
 export function isLineOperatingNow(linea, now = new Date()) {
   if (!linea?.activo) return false;
 
-  // ✅ respeta días si existe
+  // respeta días si existe
   if (!isOperatingTodayByDias(linea, now)) return false;
 
   const tipo = normStr(linea?.tipo);
   const cur = nowMinutes(now);
 
-  // ✅ RURAL
+  // RURAL
   if (tipo === "rural") {
     const ida = Array.isArray(linea.horario_ida) ? linea.horario_ida : [];
     const ret = Array.isArray(linea.horario_retorno) ? linea.horario_retorno : [];
@@ -177,7 +177,7 @@ export function isLineOperatingNow(linea, now = new Date()) {
     return cur >= r.start || cur <= r.end;
   }
 
-  // ✅ URBANO
+  // URBANO
   const wknd = isWeekend(now);
 
   if (wknd && Array.isArray(linea.horariofinsem) && linea.horariofinsem.length) {
@@ -209,7 +209,7 @@ export function formatLineScheduleHTML(linea) {
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;");
 
-  // ✅ RURAL
+  // RURAL
   if (tipo === "rural") {
     const dias = String(linea?.dias || "").trim() || "(sin dato)";
 
@@ -266,7 +266,7 @@ export function formatLineScheduleHTML(linea) {
     `;
   }
 
-  // ✅ URBANO
+  // URBANO
   const hIni = String(linea?.horario_inicio || "").trim();
   const hFin = String(linea?.horario_fin || "").trim();
   const freq = Number(linea?.frecuencia_min);
@@ -306,7 +306,7 @@ export function formatLineScheduleHTML(linea) {
 
 /* ==========================
    LÍNEAS (cacheadas)
-   ✅ ctx.ignoreGeoFilter => trae TODO (para Sevilla o bus combinado)
+   ctx.ignoreGeoFilter => trae TODO
 ========================== */
 export async function getLineasByTipo(tipo, ctx = {}) {
   const t = normStr(tipo);
@@ -314,7 +314,7 @@ export async function getLineasByTipo(tipo, ctx = {}) {
   const all = await getCollectionCache(collection);
 
   if (ctx?.ignoreGeoFilter) {
-    return all.filter(l => l?.activo && normStr(l?.tipo) === t);
+    return (Array.isArray(all) ? all : []).filter(l => l?.activo && normStr(l?.tipo) === t);
   }
 
   const cantonSel = normKey(ctx?.canton);
@@ -322,7 +322,7 @@ export async function getLineasByTipo(tipo, ctx = {}) {
 
   const out = [];
 
-  all.forEach(l => {
+  (Array.isArray(all) ? all : []).forEach(l => {
     if (!l?.activo) return;
     if (normStr(l.tipo) !== t) return;
 
@@ -366,13 +366,16 @@ export async function getParadasByLinea(codigoLinea, ctx = {}) {
     const paradas = [];
 
     const sentidoSel = normStr(ctx?.sentido);
+    const codeNeed = normStr(codigoLinea);
 
-    all.forEach(p => {
+    (Array.isArray(all) ? all : []).forEach(p => {
       if (!p?.activo) return;
       if (normStr(p?.tipo) !== "rural") return;
 
+      // ✅ case-insensitive match en lineasruralpasan
       const lineas = Array.isArray(p?.lineasruralpasan) ? p.lineasruralpasan : [];
-      if (!lineas.includes(codigoLinea)) return;
+      const okLinea = lineas.some(x => normStr(x) === codeNeed);
+      if (!okLinea) return;
 
       if (sentidoSel) {
         if (normStr(p?.sentido) !== sentidoSel) return;
@@ -389,7 +392,7 @@ export async function getParadasByLinea(codigoLinea, ctx = {}) {
   const all = await getCollectionCache("paradas_transporte");
   const paradas = [];
 
-  all.forEach(p => {
+  (Array.isArray(all) ? all : []).forEach(p => {
     if (p?.activo && p.codigo_linea === codigoLinea) paradas.push(p);
   });
 

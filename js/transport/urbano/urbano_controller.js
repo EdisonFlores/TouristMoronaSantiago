@@ -456,7 +456,28 @@ if (!ctx?.preserveLayers) {
 
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
 
-  const lineas = await getLineasByTipo("urbano", ctx);
+  let lineas = await getLineasByTipo("urbano", ctx);
+
+// ✅ NUEVO: Proaño / Río Blanco => SOLO Línea 5
+const normLite = (s) => String(s || "").trim().toLowerCase();
+const isProanoOrRioBlanco = () => {
+  const pCtx = normLite(ctx?.parroquia);
+  const pDest = normLite(destPlace?.parroquia);
+  const cCtx = normLite(ctx?.canton);
+  const cDest = normLite(destPlace?.canton || destPlace?.ciudad);
+
+  const hayProano = (pCtx.includes("proa") || pDest.includes("proa") || cCtx.includes("proa") || cDest.includes("proa"));
+  const hayRioBlanco =
+    (pCtx.includes("rio blanco") || pDest.includes("rio blanco") || cCtx.includes("rio blanco") || cDest.includes("rio blanco")) ||
+    (pCtx.includes("río blanco") || pDest.includes("río blanco") || cCtx.includes("río blanco") || cDest.includes("río blanco"));
+
+  return hayProano || hayRioBlanco;
+};
+
+if (isProanoOrRioBlanco()) {
+  lineas = (Array.isArray(lineas) ? lineas : []).filter(l => normStr(l?.codigo) === "l5");
+}
+
 
   // Radios crecientes (metros)
   const BOARD_STEPS = [25, 100, 150, 250, 350, 450, 550, 650, 800, 1000,1200,1300];

@@ -1,47 +1,43 @@
 // js/transport/transport_controller.js
-import * as urbano from "./urbano/urbano_controller.js";
-import * as rural from "./rural/rural_controller.js";
+import { clearRoute } from "../map/map.js";
+import { clearTransportState } from "./core/transport_state.js";
 
+// Controladores
+import { cargarLineasTransporte as cargarUrbano } from "./urbano/urbano_controller.js";
+import { cargarLineasTransporte as cargarRural, planAndShowBusStopsForPlace } from "./rural/rural_controller.js";
+
+/* =====================================================
+   LIMPIEZA GENERAL
+===================================================== */
 export function clearTransportLayers() {
-  urbano.clearTransportLayers();
-  rural.clearTransportLayers();
+  try { clearRoute?.(); } catch {}
+  try { clearTransportState?.(); } catch {}
 }
 
+/* =====================================================
+   CARGAR LÍNEAS (select "Líneas de transporte")
+===================================================== */
 export async function cargarLineasTransporte(tipo, container, ctx = {}) {
   const t = String(tipo || "").toLowerCase();
-  if (t === "rural") return rural.cargarLineasTransporte(tipo, container, ctx);
-  return urbano.cargarLineasTransporte(tipo, container, ctx);
+
+  clearTransportLayers();
+
+  if (t === "urbano") {
+    return cargarUrbano(tipo, container, ctx);
+  }
+
+  if (t === "rural") {
+    return cargarRural(tipo, container, ctx);
+  }
+
+  container.innerHTML = `<div class="alert alert-warning py-2">Tipo no soportado</div>`;
+  return;
 }
 
-export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
-  const t = String(linea?.tipo || "").toLowerCase();
-  if (t === "rural") return rural.mostrarRutaLinea(linea, opts, ctx);
-  return urbano.mostrarRutaLinea(linea, opts, ctx);
-}
-
-/**
- * ✅ MODO BUS (AUTO):
- * - prueba urbano primero (como estaba)
- * - si no hay solución, prueba rural
- * - Sevilla Don Bosco: permite combinado (rural + urbano Morona)
- */
+/* =====================================================
+   MODO BUS desde UI general (🚌)
+   (por ahora: RURAL directo, sin trasbordo)
+===================================================== */
 export async function planAndShowBusStops(userLoc, destPlace, ctx = {}, ui = {}) {
-  const specialSevilla = ctx?.specialSevilla === true;
-
-  // 1) intento urbano
-  const urbanoRes = await urbano.planAndShowBusStopsForPlace(userLoc, destPlace, {
-    ...ctx,
-    tipo: "urbano",
-  }, ui);
-
-  if (urbanoRes) return urbanoRes;
-
-  // 2) intento rural (enganchar a ruta)
-  const ruralRes = await rural.planAndShowBusStopsForPlace(userLoc, destPlace, {
-    ...ctx,
-    tipo: "rural",
-    specialSevilla
-  }, ui);
-
-  return ruralRes;
+  return planAndShowBusStopsForPlace(userLoc, destPlace, ctx, ui);
 }
