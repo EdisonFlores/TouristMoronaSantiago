@@ -43,12 +43,8 @@ const RURAL_DEST_STEPS  = [250, 450, 650, 900, 1200, 1500, 2000, 2600, 3200];
 const LEVELS_RURAL = Math.max(RURAL_BOARD_STEPS.length, RURAL_DEST_STEPS.length);
 const EXAGGERATED_WALK_WARN_M = 2300;
 
-// ✅ si la parada más cercana está a más de 1km,
-// NO caminar hasta la parada, enganchar a la ruta
 const MAX_WALK_TO_STOP_M = 1000;
-
-// ✅ si caminata al destino es demasiado grande -> bajar en finderuta y luego AUTO
-const MAX_WALK_TO_DEST_M = 1500; // ajustable
+const MAX_WALK_TO_DEST_M = 1500;
 
 /* =====================================================
    MODAL (Bootstrap)
@@ -426,7 +422,7 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
 }
 
 /* =====================================================
-   MOSTRAR RUTA (RURAL) - línea completa (igual a tu base)
+   MOSTRAR RUTA (RURAL) - línea completa
 ===================================================== */
 export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   clearTransportLayers();
@@ -497,11 +493,8 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
 
 /* =====================================================
    🚌 MODO BUS (RURAL)
-   ✅ FIX MINIMOS:
-   1) bajar en PARADA cercana al destino (si existe)
-   2) pintar SOLO paradas del tramo real (no todas)
-   3) si caminata al destino es muy grande -> finderuta + AUTO
-   4) dashed doble visible (lo logra el fix en transport_osrm.js)
+   ✅ NUEVO: ctx.dryRun => calcular SIN dibujar
+   ✅ respeta ctx.preserveLayers
 ===================================================== */
 function llKey(ll) {
   if (!ll) return "";
@@ -520,7 +513,10 @@ function buildIndexByLatLng(coords) {
 export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {}) {
   if (!userLoc || !destPlace?.ubicacion) return null;
 
-  clearTransportLayers();
+  // ✅ NO limpiar en evaluación (preserveLayers)
+  if (!ctx?.preserveLayers) {
+    clearTransportLayers();
+  }
 
   const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
@@ -528,22 +524,28 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   const lineas = await getLineasByTipo("rural", { ...ctx, ignoreGeoFilter: true });
 
   if (!lineas?.length) {
-    if (ui?.infoEl) ui.infoEl.innerHTML = "❌ No hay líneas rurales disponibles.";
+    if (ui?.infoEl && !ctx?.dryRun) ui.infoEl.innerHTML = "❌ No hay líneas rurales disponibles.";
     return null;
   }
 
-  const walkLayer = L.layerGroup().addTo(map);
-  setAccessLayer(walkLayer);
+  // Si es dryRun, no creamos capas
+  let walkLayer = null;
+  let routesGroup = null;
+  let layerStops = null;
 
-  const routesGroup = L.layerGroup().addTo(map);
-  setRouteLayer(routesGroup);
+  if (!ctx?.dryRun) {
+    walkLayer = L.layerGroup().addTo(map);
+    setAccessLayer(walkLayer);
 
-  const layerStops = L.layerGroup().addTo(map);
-  setStopsLayer(layerStops);
+    routesGroup = L.layerGroup().addTo(map);
+    setRouteLayer(routesGroup);
+
+    layerStops = L.layerGroup().addTo(map);
+    setStopsLayer(layerStops);
+  }
 
   let best = null;
-
-  const W_TIME = 12; // peso horario
+  const W_TIME = 12;
 
   for (let level = 0; level < LEVELS_RURAL; level++) {
     const maxBoard = RURAL_BOARD_STEPS[Math.min(level, RURAL_BOARD_STEPS.length - 1)];
@@ -574,7 +576,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
 
       const visibles = paradas.filter(isMarcadorVisible);
 
-      // SUBIR
       const nearestStopUser = findNearestStop(userLoc, visibles);
       const nearestCoordUser = findNearestCoordOnPath(userLoc, coords);
 
@@ -597,7 +598,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       const idxBoard = findNearestCoordIndex(coords, boardLL);
       if (idxBoard < 0) continue;
 
-      // BAJAR: ✅ PRIORIDAD A PARADA
       const nearestStopDest = findNearestStop(destLoc, visibles);
       const nearestCoordDest = findNearestCoordOnPath(destLoc, coords);
 
@@ -617,7 +617,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
         continue;
       }
 
-      // ✅ si caminata al destino es demasiado grande => fin de ruta (finderuta) + auto
       let useAuto = false;
       let finLL = null;
 
@@ -684,7 +683,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   }
 
   if (!best) {
-    if (ui?.infoEl) {
+    if (ui?.infoEl && !ctx?.dryRun) {
       ui.infoEl.innerHTML = `
         <div class="alert alert-warning py-2 mb-2">
           ❌ No se encontró una ruta rural cercana con límites razonables.
@@ -694,12 +693,32 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     return null;
   }
 
+  // ✅ DRY RUN: retornar sin dibujar
+  if (ctx?.dryRun) {
+    const metrics = {
+      walk1: best.boardDist || 0,
+      walk2: best.useAuto ? 0 : (best.walkToDest || 0),
+      stopsCount: Math.max(0, (best.toIdx - best.fromIdx))
+    };
+    const score = Number.isFinite(best.score)
+      ? best.score
+      : (metrics.walk1 + metrics.walk2) + (metrics.stopsCount * 20) + (best.useAuto ? 800 : 0);
+
+    return {
+      tipo: "rural",
+      linea: best.linea,
+      sentido: best.sentido,
+      useAuto: best.useAuto,
+      metrics,
+      score
+    };
+  }
+
   // ======= pintar resultado =======
   setCurrentLinea(best.linea);
   setCurrentParadas(best.paradas);
   setCurrentStopOffsets(computeStopOffsets(best.paradas, best.linea));
 
-  // ✅ pintar SOLO paradas dentro del tramo real
   const idxMap = buildIndexByLatLng(best.coords);
 
   const stopMarkers = [];
@@ -732,7 +751,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   }
   setCurrentStopMarkers(stopMarkers);
 
-  // board / alight markers
   L.circleMarker(best.boardLL, {
     radius: 10, color: "#2e7d32", fillColor: "#2e7d32", fillOpacity: 1, weight: 3
   })
@@ -749,14 +767,11 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     .addTo(layerStops)
     .bindPopup(`<b>⛔ Bajar aquí</b><br>${best.alightLabel}`);
 
-  // ✅ dashed 1 (usuario -> subir)
   await drawDashedAccessRoute(userLoc, best.boardLL, "#666");
 
-  // ✅ ruta rural (tramo)
   const ruralLine = await drawLineRouteFollowingStreets(best.tramoCoords, best.linea.color || "#000");
   if (ruralLine) routesGroup.addLayer(ruralLine);
 
-  // ✅ tramo final: caminar o auto
   if (best.useAuto) {
     await drawRouteBetweenPoints({
       from: best.alightLL,
@@ -765,7 +780,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       dashed: false
     });
   } else {
-    // dashed 2 (bajar -> destino)
     await drawDashedAccessRoute(best.alightLL, destLoc, "#666");
   }
 
@@ -779,13 +793,12 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       🧭 Sentido: <b>${best.sentido}</b><br>
       ${op ? "✅ Operativa ahora" : "⛔ Fuera de servicio ahora"}<br>
       ${(() => {
-  if (best.dtMin >= 9999) return `⏳ Próxima salida aprox.: <b>sin dato</b><br>`;
-  const h = Math.floor(best.dtMin / 60);
-  const m = best.dtMin % 60;
-  const txt = (h > 0) ? `${h} h ${m} min` : `${m} min`;
-  return `⏳ Próxima salida aprox.: <b>${txt}</b><br>`;
-})()}
-
+        if (best.dtMin >= 9999) return `⏳ Próxima salida aprox.: <b>sin dato</b><br>`;
+        const h = Math.floor(best.dtMin / 60);
+        const m = best.dtMin % 60;
+        const txt = (h > 0) ? `${h} h ${m} min` : `${m} min`;
+        return `⏳ Próxima salida aprox.: <b>${txt}</b><br>`;
+      })()}
       🚶 Camina a subir (${best.boardLabel}): <b>${Math.round(best.boardDist)} m</b><br>
       ${best.useAuto
         ? `🏁 Bajar en: <b>${best.alightLabel}</b><br>🚗 Auto al destino.`
@@ -797,5 +810,5 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   }
 
   map.fitBounds(L.latLngBounds([userLoc, destLoc, best.boardLL, best.alightLL]).pad(0.2));
-  return { linea: best.linea, sentido: best.sentido, useAuto: best.useAuto };
+  return { tipo: "rural", linea: best.linea, sentido: best.sentido, useAuto: best.useAuto, score: best.score };
 }

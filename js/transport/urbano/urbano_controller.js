@@ -9,7 +9,6 @@ import {
   normStr,
   titleCase,
   normCobertura,
-  // ✅ NUEVO: horario + formato
   isLineOperatingNow,
   formatLineScheduleHTML
 } from "../core/transport_data.js";
@@ -124,8 +123,6 @@ function showLineaModal(linea, now = new Date()) {
     `;
   }
 
-  // Bootstrap 5 modal
-  // (bootstrap.bundle ya está en tu HTML, así que window.bootstrap existe)
   const modal = window.bootstrap?.Modal?.getOrCreateInstance(modalEl, {
     backdrop: true,
     keyboard: true
@@ -181,13 +178,8 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
     const target = ev.target;
     if (!target || !target.id) return;
 
-    // ✅ usar now del ctx si existe (para finde vs diario)
     const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
 
-    /* =====================
-       SELECCIÓN DE LÍNEA
-       ✅ aquí SÍ mostramos modal
-    ===================== */
     if (target.id === "select-linea") {
       const codigo = target.value;
       const linea = lineas.find(l => l.codigo === codigo);
@@ -202,7 +194,6 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
 
       if (!linea) return;
 
-      // ✅ POPUP SOLO AQUÍ (cuando eliges una línea)
       showLineaModal(linea, now);
 
       const needsSentido = ["l3", "l4", "l5"].includes(normStr(linea.codigo));
@@ -234,10 +225,6 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
 
     const isL5 = normStr(currentLineaSel.codigo) === "l5";
 
-    /* =====================
-       SELECCIÓN DE SENTIDO
-       ❌ NO mostramos modal aquí
-    ===================== */
     if (target.id === "select-sentido") {
       const sentidoSel = titleCase(normStr(target.value));
 
@@ -274,10 +261,6 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
       return;
     }
 
-    /* =====================
-       SELECCIÓN DE COBERTURA
-       ❌ NO mostramos modal aquí
-    ===================== */
     if (target.id === "select-cobertura") {
       if (!isL5) return;
 
@@ -428,7 +411,8 @@ function resaltarYConectarParadaMasCercana(paradas, linea) {
 }
 
 /* =====================================================
-   🚌 MODO BUS: (tu código se queda igual)
+   🚌 MODO BUS: planner URBANO
+   ✅ NUEVO: ctx.dryRun => calcular SIN dibujar
 ===================================================== */
 async function drawWalkOSRM(layerGroup, fromLatLng, toLatLng) {
   const profile = "foot";
@@ -450,48 +434,43 @@ async function drawWalkOSRM(layerGroup, fromLatLng, toLatLng) {
 export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {}) {
   if (!userLoc || !destPlace?.ubicacion) return null;
 
-if (!ctx?.preserveLayers) {
-  clearTransportLayers();
-}
+  // ✅ NO limpiar si preserveLayers está activo (modo evaluación)
+  if (!ctx?.preserveLayers) {
+    clearTransportLayers();
+  }
 
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
 
   let lineas = await getLineasByTipo("urbano", ctx);
 
-// ✅ NUEVO: Proaño / Río Blanco => SOLO Línea 5
-const normLite = (s) => String(s || "").trim().toLowerCase();
-const isProanoOrRioBlanco = () => {
-  const pCtx = normLite(ctx?.parroquia);
-  const pDest = normLite(destPlace?.parroquia);
-  const cCtx = normLite(ctx?.canton);
-  const cDest = normLite(destPlace?.canton || destPlace?.ciudad);
+  // ✅ Proaño / Río Blanco => SOLO Línea 5
+  const normLite = (s) => String(s || "").trim().toLowerCase();
+  const isProanoOrRioBlanco = () => {
+    const pCtx = normLite(ctx?.parroquia);
+    const pDest = normLite(destPlace?.parroquia);
+    const cCtx = normLite(ctx?.canton);
+    const cDest = normLite(destPlace?.canton || destPlace?.ciudad);
 
-  const hayProano = (pCtx.includes("proa") || pDest.includes("proa") || cCtx.includes("proa") || cDest.includes("proa"));
-  const hayRioBlanco =
-    (pCtx.includes("rio blanco") || pDest.includes("rio blanco") || cCtx.includes("rio blanco") || cDest.includes("rio blanco")) ||
-    (pCtx.includes("río blanco") || pDest.includes("río blanco") || cCtx.includes("río blanco") || cDest.includes("río blanco"));
+    const hayProano = (pCtx.includes("proa") || pDest.includes("proa") || cCtx.includes("proa") || cDest.includes("proa"));
+    const hayRioBlanco =
+      (pCtx.includes("rio blanco") || pDest.includes("rio blanco") || cCtx.includes("rio blanco") || cDest.includes("rio blanco")) ||
+      (pCtx.includes("río blanco") || pDest.includes("río blanco") || cCtx.includes("río blanco") || cDest.includes("río blanco"));
 
-  return hayProano || hayRioBlanco;
-};
+    return hayProano || hayRioBlanco;
+  };
 
-if (isProanoOrRioBlanco()) {
-  lineas = (Array.isArray(lineas) ? lineas : []).filter(l => normStr(l?.codigo) === "l5");
-}
+  if (isProanoOrRioBlanco()) {
+    lineas = (Array.isArray(lineas) ? lineas : []).filter(l => normStr(l?.codigo) === "l5");
+  }
 
-
-  // Radios crecientes (metros)
-  const BOARD_STEPS = [25, 100, 150, 250, 350, 450, 550, 650, 800, 1000,1200,1300];
+  const BOARD_STEPS = [25, 100, 150, 250, 350, 450, 550, 650, 800, 1000, 1200, 1300];
   const DEST_STEPS  = [100, 150, 250, 350, 450, 550, 650];
   const LEVELS = Math.max(BOARD_STEPS.length, DEST_STEPS.length);
 
-  // pesos base (balanceados)
   const BASE = { wWalk1: 1.2, wWalk2: 1.6, wBus: 1.0, wStops: 25 };
-
-  // ✅ penalización especial SOLO para “circulación”
   const CIRC = { wWalk1: 1.2, wWalk2: 1.6, wBus: 1.25, wStops: 45 };
 
-  // ✅ anti-vuelta-completa: si recorre demasiadas paradas de la vuelta, descartar
-  const MAX_LOOP_RATIO = 0.65; // 65% de todas las paradas = demasiado
+  const MAX_LOOP_RATIO = 0.65;
 
   let best = null;
   let bestLinea = null;
@@ -538,7 +517,6 @@ if (isProanoOrRioBlanco()) {
 
       if (!plan) continue;
 
-      // ✅ filtro anti-vuelta completa para circulación
       if (isCirculacion) {
         const total = paradasAll.length;
         if (total >= 10) {
@@ -549,13 +527,11 @@ if (isProanoOrRioBlanco()) {
 
       const score = plan.score;
 
-      // ✅ en mismo nivel: preferir menor maxWalk (balance real)
       const better =
         score < levelBestScore ||
         (levelBest && Math.abs(score - levelBestScore) < 80 &&
           Math.max(plan.metrics.walk1, plan.metrics.walk2) < Math.max(levelBest.metrics.walk1, levelBest.metrics.walk2));
 
-      // ✅ extra tie-break: si ambos son circulación y score cercano, elegir MENOS paradas
       const tieCirculationBetter =
         levelBest &&
         (String(levelBestLinea?.origen || "").toLowerCase() === "circulacion") &&
@@ -575,22 +551,36 @@ if (isProanoOrRioBlanco()) {
       best = levelBest;
       bestLinea = levelBestLinea;
       bestParadas = levelBestParadas;
-      break; // ✅ no seguimos expandiendo radios si ya hay solución
+      break;
     }
   }
 
   if (!best || !bestLinea || !bestParadas) {
-    if (ui?.infoEl) ui.infoEl.innerHTML = "❌ No se encontró una línea adecuada (paradas cercanas).";
+    if (ui?.infoEl && !ctx?.dryRun) ui.infoEl.innerHTML = "❌ No se encontró una línea adecuada (paradas cercanas).";
     return null;
   }
 
-  // estado popups
+  // ✅ DRY RUN: devolver SIN dibujar
+  if (ctx?.dryRun) {
+    return {
+      tipo: "urbano",
+      linea: bestLinea,
+      plan: best,
+      metrics: best.metrics || {
+        walk1: best?.metrics?.walk1 || 0,
+        walk2: best?.metrics?.walk2 || 0,
+        stopsCount: best?.metrics?.stopsCount || 0
+      },
+      score: Number.isFinite(best.score) ? best.score : best?.score
+    };
+  }
+
+  // ====== DIBUJAR ======
   setCurrentLinea(bestLinea);
   bestParadas.sort((a, b) => (Number(a.orden) || 0) - (Number(b.orden) || 0));
   setCurrentParadas(bestParadas);
   setCurrentStopOffsets(computeStopOffsets(bestParadas, bestLinea));
 
-  // capas
   setRouteLayer(null);
 
   const layerStops = L.layerGroup().addTo(map);
@@ -602,7 +592,6 @@ if (isProanoOrRioBlanco()) {
   const boardLL = [best.boardStop.ubicacion.latitude, best.boardStop.ubicacion.longitude];
   const alightLL = [best.alightStop.ubicacion.latitude, best.alightStop.ubicacion.longitude];
 
-  // paradas del tramo real (para “ver” la línea)
   if (Array.isArray(best.pathStops) && best.pathStops.length) {
     best.pathStops.forEach(p => {
       const { latitude, longitude } = p.ubicacion || {};
@@ -629,7 +618,6 @@ if (isProanoOrRioBlanco()) {
     });
   }
 
-  // subir/bajar
   const boardMarker = L.circleMarker(boardLL, {
     radius: 10, color: "#2e7d32", fillColor: "#2e7d32", fillOpacity: 1, weight: 3
   })
@@ -653,20 +641,19 @@ if (isProanoOrRioBlanco()) {
   boardMarker.on("popupclose", stopPopupLiveUpdate);
   alightMarker.on("popupclose", stopPopupLiveUpdate);
 
-  // caminatas OSRM
   const w1 = await drawWalkOSRM(walkLayer, userLoc, boardLL);
   const w2 = await drawWalkOSRM(walkLayer, alightLL, destLoc);
 
-    if (ui?.infoEl) {
+  if (ui?.infoEl) {
     const walk1m = w1?.route?.distance ? Math.round(w1.route.distance) : Math.round(best.metrics.walk1);
     const walk2m = w2?.route?.distance ? Math.round(w2.route.distance) : Math.round(best.metrics.walk2);
 
-    const warnWalkMeters = 2300; // umbral “exagerado”
+    const warnWalkMeters = 2300;
     const totalWalk = walk1m + walk2m;
 
     const warnHTML = (totalWalk >= warnWalkMeters)
       ? `<div class="alert alert-warning py-2 mt-2 mb-0">
-           ⚠️ Se encontró ruta pero requiere caminar ~${(totalWalk/1000).toFixed(1)} km.
+           ⚠️ Se encontró ruta pero requiere caminar ~${(totalWalk / 1000).toFixed(1)} km.
          </div>`
       : "";
 
@@ -682,7 +669,6 @@ if (isProanoOrRioBlanco()) {
     `;
   }
 
-
   map.fitBounds(L.latLngBounds([userLoc, destLoc, boardLL, alightLL]).pad(0.2));
-  return { linea: bestLinea, plan: best };
+  return { tipo: "urbano", linea: bestLinea, plan: best, metrics: best.metrics, score: best.score };
 }

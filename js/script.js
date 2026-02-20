@@ -62,7 +62,6 @@ const extra = document.getElementById("extra-controls");
 
 /* ================= UX: ocultar selects base desde el inicio ================= */
 function hideBaseSelects() {
-  // no los quitamos, solo los ocultamos
   provincia?.classList?.add("d-none");
   canton?.classList?.add("d-none");
   parroquia?.classList?.add("d-none");
@@ -96,6 +95,120 @@ function titleCaseWords(s) {
 
 function normLite(s) {
   return String(s || "").trim().toLowerCase();
+}
+
+/* =====================================================
+   ✅ FALLBACK BD: detectar provincia/cantón/parroquia
+   por cercanía a docs existentes (si Nominatim falla)
+   Prioridad: lugar > paradas_transporte(tipo urbana) > paradas_rurales(tipo rural)
+===================================================== */
+function llFromDoc(doc) {
+  const u = doc?.ubicacion;
+  const { latitude, longitude } = u || {};
+  if (typeof latitude !== "number" || typeof longitude !== "number") return null;
+  return [latitude, longitude];
+}
+
+function normalizeAdminFromDoc(source, doc) {
+  const s = String(source || "").toLowerCase();
+
+  if (s === "lugar") {
+    return {
+      provincia: String(doc?.provincia || ""),
+      canton: String(doc?.ciudad || ""),   // lugar.ciudad = cantón
+      parroquia: String(doc?.parroquia || "")
+    };
+  }
+
+  if (s === "paradas_rurales") {
+    return {
+      provincia: String(doc?.provincia || ""),
+      canton: String(doc?.cantonorigen || ""),
+      parroquia: String(doc?.parroquiaorigen || "")
+    };
+  }
+
+  if (s === "paradas_transporte") {
+    return {
+      provincia: String(doc?.provincia || ""),
+      canton: String(doc?.canton || ""),
+      parroquia: String(doc?.ciudad || "") // paradas_transporte.ciudad = parroquia/sector
+    };
+  }
+
+  return { provincia: "", canton: "", parroquia: "" };
+}
+
+function isAdminUsable(a) {
+  const p = String(a?.provincia || "").trim();
+  const c = String(a?.canton || "").trim();
+  return Boolean(p && c);
+}
+
+function passTypeFilter(source, doc) {
+  const t = normLite(doc?.tipo);
+
+  // lugar: sin tipo
+  if (source === "lugar") return true;
+
+  // paradas_transporte: solo "urbana"
+  if (source === "paradas_transporte") return t === "urbana";
+
+  // paradas_rurales: solo "rural"
+  if (source === "paradas_rurales") return t === "rural";
+
+  return true;
+}
+
+async function inferAdminFromDBByNearest(userLoc, opts = {}) {
+  const MAX_RADIUS_M = opts.maxRadiusM ?? 7000;  // tolerante (zona rural)
+  const HARD_ACCEPT_M = opts.hardAcceptM ?? 1200;
+
+  const sources = [
+    { name: "lugar",              priority: 1 },
+    { name: "paradas_transporte", priority: 2 },
+    { name: "paradas_rurales",    priority: 3 }
+  ];
+
+  let best = null;
+
+  for (const src of sources) {
+    const all = await getCollectionCache(src.name);
+    const arr = Array.isArray(all) ? all : [];
+
+    for (const doc of arr) {
+      if (doc?.activo === false) continue;
+      if (!passTypeFilter(src.name, doc)) continue;
+
+      const ll = llFromDoc(doc);
+      if (!ll) continue;
+
+      const d = map.distance(userLoc, ll);
+      if (d > MAX_RADIUS_M) continue;
+
+      const admin = normalizeAdminFromDoc(src.name, doc);
+      if (!isAdminUsable(admin)) continue;
+
+      const cand = { admin, distM: d, source: src.name, priority: src.priority };
+
+      // ✅ si está MUY cerca -> aceptar inmediato
+      if (d <= HARD_ACCEPT_M) {
+        return { ...cand.admin, _source: cand.source, _distM: cand.distM };
+      }
+
+      if (!best) {
+        best = cand;
+      } else {
+        const betterDist = cand.distM < best.distM;
+        const tie = Math.abs(cand.distM - best.distM) < 80;
+        const betterPriority = tie && cand.priority < best.priority;
+        if (betterDist || betterPriority) best = cand;
+      }
+    }
+  }
+
+  if (!best) return null;
+  return { ...best.admin, _source: best.source, _distM: best.distM };
 }
 
 /* ================= MODAL GENERAL ================= */
@@ -133,8 +246,6 @@ function showModal(title, html) {
 async function getUserCantonTerminal() {
   const lugares = await getCollectionCache("lugar");
 
-  // ciudad hace las veces de cantón (según tu BD)
-  // usamos ctxGeo.canton lógico
   const provSel = ctxGeo.provincia;
   const cantonSel = ctxGeo.canton;
 
@@ -197,76 +308,103 @@ async function buildRoute() {
   drawRoute(getUserLocation(), activePlace, activeMode, infoEl);
 }
 
-/* ================= GEOLOCALIZACIÓN (con ubicación de prueba) =================
-   ✅ Para probar: deja USE_TEST_LOCATION=true
-   ✅ Para producción: ponlo en false y listo
-============================================================================= */
+/* ================= GEOLOCALIZACIÓN ================= */
 const USE_TEST_LOCATION = false;
 const TEST_LOCATION = [-2.385050, -78.115910];
 
 function showLocatingBanner() {
+  if (!extra) return;
+
+  // ✅ banner "ubicando..." (azul)
   extra.innerHTML = `
-    <div class="alert alert-info py-2 mb-2">
+    <div id="loc-banner" class="alert alert-info py-2 mb-2">
       📡 <b>Estamos ubicándote…</b><br>
       <small>Esto puede tardar unos segundos.</small>
     </div>
   `;
 }
 
+/* ✅ UI de ubicación (reemplaza el banner azul por verde o rojo) */
+function showDetectedFacade() {
+  if (!extra) return;
 
+  const banner = document.getElementById("loc-banner");
+  if (!banner) return;
 
-if (USE_TEST_LOCATION) {
-  const loc = TEST_LOCATION;
-  setUserLocation(loc);
+  const p = String(detectedAdmin?.provincia || "").trim();
+  const c = String(detectedAdmin?.canton || "").trim();
+  const pa = String(detectedAdmin?.parroquia || "").trim();
 
-  map.setView(loc, 13);
-  L.marker(loc).addTo(map).bindPopup("🧪 Ubicación de prueba").openPopup();
-
-  await detectAdminFromLatLng(loc);
-  showDetectedFacade();
-
-  // ✅ AÑADE ESTA LÍNEA
-  enableCategoryUI();
-
-} else {
-  navigator.geolocation.getCurrentPosition(async pos => {
-    const loc = [pos.coords.latitude, pos.coords.longitude];
-    setUserLocation(loc);
-
-    map.setView(loc, 14);
-    L.marker(loc).addTo(map).bindPopup("📍 Tu ubicación").openPopup();
-
-    await detectAdminFromLatLng(loc);
-    showDetectedFacade();
-
-    // ✅ AÑADE ESTA LÍNEA
-    enableCategoryUI();
-
-  }, () => {
-    extra.innerHTML = `
-      <div class="alert alert-danger py-2 mb-2">
-        ❌ No se pudo obtener tu ubicación.
+  // 🔴 Si NO se pudo determinar por Nominatim ni por BD
+  if (!p || !c) {
+    banner.className = "alert alert-danger py-2 mb-2";
+    banner.innerHTML = `
+      ❌ <b>No se pudo determinar tu ubicación</b><br>
+      <div class="mt-1">
+        No hay lugares/paradas registrados cerca de la zona en la que te encuentras.
+      </div>
+      <div class="small mt-1">
+        Pronto ampliaremos la cobertura.
       </div>
     `;
-  });
+    return;
+  }
+
+  // 🟢 Ubicación detectada
+  banner.className = "alert alert-success py-2 mb-2";
+  banner.innerHTML = `
+    ✅ <b>Usted se encuentra en:</b><br>
+    <b>Provincia:</b> ${p}<br>
+    <b>Cantón:</b> ${c}<br>
+    <b>Parroquia:</b> ${pa || "(no detectada)"}
+    ${
+      ctxGeo?.specialSevilla
+        ? `<div class="small mt-1">⚠️ Caso especial Sevilla activo (Sevilla + Morona)</div>`
+        : ""
+    }
+    
+  `;
 }
 
 async function detectAdminFromLatLng(loc) {
-  // fallback suave
   let admin = { provincia: "", canton: "", parroquia: "" };
 
   try {
-    const a = await reverseGeocodeNominatim(loc[0], loc[1]);
+    const a = await reverseGeocodeNominatim(loc[0], loc[1], {
+      retries: 1,
+      timeoutMs: 6500,
+      initialDelayMs: 900
+    });
+
     admin = {
       provincia: titleCaseWords(a.provincia),
       canton: titleCaseWords(a.canton),
       parroquia: titleCaseWords(a.parroquia)
     };
   } catch (e) {
-    console.warn("Nominatim falló:", e);
+    console.warn("Nominatim falló. Usando fallback BD por cercanía.", e);
+
+    // ✅ FALLBACK BD
+    const fromDB = await inferAdminFromDBByNearest(loc, {
+      maxRadiusM: 7000,
+      hardAcceptM: 1200
+    });
+
+    if (fromDB) {
+      admin = {
+        provincia: titleCaseWords(fromDB.provincia),
+        canton: titleCaseWords(fromDB.canton),
+        parroquia: titleCaseWords(fromDB.parroquia)
+      };
+      console.log(`✅ ctxGeo inferido por ${fromDB._source} a ${Math.round(fromDB._distM)} m`, fromDB);
+    } else {
+      // ❌ No se encontró nada: dejar admin vacío para que salga banner rojo
+      admin = { provincia: "", canton: "", parroquia: "" };
+      console.warn("❌ Fallback BD no encontró nada. Ubicación no determinable.");
+    }
   }
 
-  // ✅ Caso especial: Nominatim puede decir Sevilla Don Bosco o algo con Sevilla
+  // ✅ Caso especial Sevilla (aunque admin venga vacío no revienta)
   const anySevilla =
     normLite(admin.canton).includes("sevilla") ||
     normLite(admin.parroquia).includes("sevilla");
@@ -278,7 +416,6 @@ async function detectAdminFromLatLng(loc) {
       parroquia: "Sevilla Don Bosco"
     };
 
-    // lógica: Sevilla se maneja como “parroquia especial” pero puede mostrar Morona también
     ctxGeo = {
       provincia: "Morona Santiago",
       canton: "Sevilla Don Bosco",
@@ -294,7 +431,6 @@ async function detectAdminFromLatLng(loc) {
     parroquia: admin.parroquia || ""
   };
 
-  // lógica normal
   ctxGeo = {
     provincia: detectedAdmin.provincia,
     canton: detectedAdmin.canton,
@@ -303,19 +439,28 @@ async function detectAdminFromLatLng(loc) {
   };
 }
 
+function enableCategoryUI() {
+  if (!category) return;
+  category.disabled = false;
+  category.classList.remove("d-none");
+  category.value = "";
+}
+
+/* ✅ EJECUCIÓN ÚNICA (sin duplicado) */
 showLocatingBanner();
 
-// ✅ ubicación: prueba o GPS real
 if (USE_TEST_LOCATION) {
-  const loc = TEST_LOCATION;
-  setUserLocation(loc);
+  (async () => {
+    const loc = TEST_LOCATION;
+    setUserLocation(loc);
 
-  map.setView(loc, 13);
-  L.marker(loc).addTo(map).bindPopup("🧪 Ubicación de prueba").openPopup();
+    map.setView(loc, 13);
+    L.marker(loc).addTo(map).bindPopup("🧪 Ubicación de prueba").openPopup();
 
-  await detectAdminFromLatLng(loc);
-  showDetectedFacade();
-
+    await detectAdminFromLatLng(loc);
+    showDetectedFacade();
+    enableCategoryUI();
+  })();
 } else {
   navigator.geolocation.getCurrentPosition(async pos => {
     const loc = [pos.coords.latitude, pos.coords.longitude];
@@ -326,13 +471,23 @@ if (USE_TEST_LOCATION) {
 
     await detectAdminFromLatLng(loc);
     showDetectedFacade();
+    enableCategoryUI();
 
   }, () => {
-    extra.innerHTML = `
-      <div class="alert alert-danger py-2 mb-2">
-        ❌ No se pudo obtener tu ubicación.
-      </div>
-    `;
+    // si no hay geolocalización, reusar banner rojo
+    const banner = document.getElementById("loc-banner");
+    if (banner) {
+      banner.className = "alert alert-danger py-2 mb-2";
+      banner.innerHTML = `
+        ❌ <b>No se pudo obtener tu ubicación.</b>
+      `;
+    } else {
+      extra.innerHTML = `
+        <div class="alert alert-danger py-2 mb-2">
+          ❌ No se pudo obtener tu ubicación.
+        </div>
+      `;
+    }
   });
 }
 
@@ -343,7 +498,6 @@ category.onchange = async () => {
 
   if (!category.value) return;
 
-  // debug fachada y lógica
   console.log("📍 Fachada:", detectedAdmin);
   console.log("🧠 ctxGeo (lógico):", ctxGeo);
 
@@ -369,7 +523,6 @@ category.onchange = async () => {
 
       const now = new Date();
 
-      // ✅ para rural: Sevilla => trae todas
       const allLineas = await getLineasByTipoAll(tipo, {
         provincia: ctxGeo.provincia,
         canton: ctxGeo.canton,
@@ -377,7 +530,6 @@ category.onchange = async () => {
         ignoreGeoFilter: (tipo === "rural" && ctxGeo.specialSevilla)
       });
 
-      // ✅ “fuera de servicio” como POPUP (no en panel)
       const fuera = allLineas
         .filter(l => !isLineOperatingNow(l, now))
         .sort((a, b) => (Number(a.orden) || 0) - (Number(b.orden) || 0));
@@ -423,7 +575,6 @@ category.onchange = async () => {
   const parroquiaSel = ctxGeo.parroquia;
   const catSel = String(category.value || "").toLowerCase();
 
-  // ✅ filtro base por provincia + subcategoria
   const base = lugares.filter(l => {
     if (!l?.activo) return false;
     if (String(l.provincia || "") !== String(provSel || "")) return false;
@@ -431,8 +582,6 @@ category.onchange = async () => {
     return true;
   });
 
-  // ✅ caso Sevilla: mostrar Sevilla Don Bosco + Morona
-  // ciudad == cantón
   if (ctxGeo.specialSevilla) {
     base.forEach(l => {
       const ciudad = String(l.ciudad || "");
@@ -445,7 +594,6 @@ category.onchange = async () => {
     });
   }
 
-  // ✅ debug en consola
   console.log(`📦 Lugares obtenidos (${catSel}):`, all);
 
   if (!all.length) {
@@ -453,9 +601,7 @@ category.onchange = async () => {
       "Sin datos",
       `
         <div class="alert alert-info py-2 mb-0">
-          ❌ No hay lugares registrados en la BD para:<br>
           <b>${provSel || "?"}</b> / <b>${cantonSel || "?"}</b> / <b>${parroquiaSel || "(sin parroquia detectada)"}</b><br>
-          <div class="small mt-2">* Si Nominatim no detecta parroquia, se muestra por cantón.</div>
         </div>
       `
     );
@@ -463,7 +609,6 @@ category.onchange = async () => {
     return;
   }
 
-  // ✅ ordenar: prioridad parroquia (si existe), y Sevilla primero si special
   all.sort((a, b) => {
     const aCity = String(a.ciudad || "");
     const bCity = String(b.ciudad || "");
@@ -477,7 +622,6 @@ category.onchange = async () => {
     const aPar = String(a.parroquia || "");
     const bPar = String(b.parroquia || "");
 
-    // si Nominatim no dio parroquia, no priorizamos
     if (parroquiaSel) {
       const aKey = (aPar === parroquiaSel) ? 0 : 1;
       const bKey = (bPar === parroquiaSel) ? 0 : 1;
@@ -545,9 +689,3 @@ category.onchange = async () => {
     };
   });
 };
-function enableCategoryUI() {
-  if (!category) return;
-  category.disabled = false;
-  category.classList.remove("d-none");   // <-- clave
-  category.value = "";                  // reset
-}
