@@ -309,7 +309,7 @@ async function buildRoute() {
 }
 
 /* ================= GEOLOCALIZACIÓN ================= */
-const USE_TEST_LOCATION = true;
+const USE_TEST_LOCATION = false
 const TEST_LOCATION = [-2.384849, -78.116655];
 
 function showLocatingBanner() {
