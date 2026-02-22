@@ -305,16 +305,52 @@ export function formatLineScheduleHTML(linea) {
 }
 
 /* ==========================
+   ✅ HELPERS para matching de códigos (rural)
+========================== */
+function normCodeLoose(x) {
+  // "L5", " l-5 ", "L_5" => "l5"
+  const s = String(x ?? "").trim().toLowerCase();
+  return s.replace(/\s+/g, "").replace(/[-_]/g, "");
+}
+
+function extractRuralLineCodes(v) {
+  const arr = Array.isArray(v) ? v : [];
+  const out = [];
+  for (const it of arr) {
+    if (typeof it === "string" || typeof it === "number") {
+      out.push(normCodeLoose(it));
+      continue;
+    }
+    if (it && typeof it === "object") {
+      if (it.codigo != null) out.push(normCodeLoose(it.codigo));
+      else if (it.code != null) out.push(normCodeLoose(it.code));
+      else if (it.id != null) out.push(normCodeLoose(it.id));
+    }
+  }
+  return out.filter(Boolean);
+}
+
+/* ==========================
    LÍNEAS (cacheadas)
    ctx.ignoreGeoFilter => trae TODO
+   ✅ CAMBIO: rural tolerante si no hay campo tipo
 ========================== */
 export async function getLineasByTipo(tipo, ctx = {}) {
   const t = normStr(tipo);
   const collection = (t === "rural") ? "lineas_rurales" : "lineas_transporte";
   const all = await getCollectionCache(collection);
+  const arr = (Array.isArray(all) ? all : []);
+
+  // ✅ helper de compatibilidad: rural acepta tipo vacío
+  const okTipo = (l) => {
+    const lt = normStr(l?.tipo);
+    if (t === "urbano") return lt === "urbano";
+    if (t === "rural") return (lt === "rural" || !lt); // 👈 tolerante
+    return false;
+  };
 
   if (ctx?.ignoreGeoFilter) {
-    return (Array.isArray(all) ? all : []).filter(l => l?.activo && normStr(l?.tipo) === t);
+    return arr.filter(l => l?.activo && okTipo(l));
   }
 
   const cantonSel = normKey(ctx?.canton);
@@ -322,9 +358,9 @@ export async function getLineasByTipo(tipo, ctx = {}) {
 
   const out = [];
 
-  (Array.isArray(all) ? all : []).forEach(l => {
+  arr.forEach(l => {
     if (!l?.activo) return;
-    if (normStr(l.tipo) !== t) return;
+    if (!okTipo(l)) return;
 
     if (cantonSel) {
       const cantones = toNormArrayKey(l.cantonpasa);
@@ -366,15 +402,15 @@ export async function getParadasByLinea(codigoLinea, ctx = {}) {
     const paradas = [];
 
     const sentidoSel = normStr(ctx?.sentido);
-    const codeNeed = normStr(codigoLinea);
+    const codeNeed = normCodeLoose(codigoLinea);
 
     (Array.isArray(all) ? all : []).forEach(p => {
       if (!p?.activo) return;
       if (normStr(p?.tipo) !== "rural") return;
 
-      // ✅ case-insensitive match en lineasruralpasan
-      const lineas = Array.isArray(p?.lineasruralpasan) ? p.lineasruralpasan : [];
-      const okLinea = lineas.some(x => normStr(x) === codeNeed);
+      // ✅ robust: normaliza y soporta string/obj en lineasruralpasan
+      const codes = extractRuralLineCodes(p?.lineasruralpasan);
+      const okLinea = codes.includes(codeNeed);
       if (!okLinea) return;
 
       if (sentidoSel) {

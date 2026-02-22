@@ -1,5 +1,6 @@
 // js/transport/rural/rural_controller.js
-import { map, drawRouteBetweenPoints } from "../../map/map.js";
+import { map, drawRouteBetweenPoints, clearRoute } from "../../map/map.js";
+import { getCollectionCache } from "../../app/cache_db.js";
 
 import { renderLineaExtraControls } from "../core/transport_ui.js";
 import {
@@ -43,11 +44,17 @@ const RURAL_DEST_STEPS  = [250, 450, 650, 900, 1200, 1500, 2000, 2600, 3200];
 const LEVELS_RURAL = Math.max(RURAL_BOARD_STEPS.length, RURAL_DEST_STEPS.length);
 const EXAGGERATED_WALK_WARN_M = 2300;
 
-const MAX_WALK_TO_STOP_M = 1000;
+const MAX_WALK_TO_STOP_M = 1000;   // preferencia, pero habrá fallback
 const MAX_WALK_TO_DEST_M = 1500;
 
+// ✅ regla nueva: si la bajada queda a <=700m del destino, caminar
+const WALK_AFTER_ALIGHT_M = 700;
+
+// ✅ cuántas paradas candidatas usar para optimizar auto (OSRM)
+const K_ALIGHT_CANDIDATES = 8;
+
 /* =====================================================
-   MODAL (Bootstrap)
+   MODAL (Bootstrap) - INFO LÍNEA
 ===================================================== */
 function ensureTransportModal() {
   let el = document.getElementById("tm-linea-modal");
@@ -120,11 +127,65 @@ function showLineaModal(linea, now = new Date()) {
 }
 
 /* =====================================================
-   LIMPIEZA
+   MODAL (Bootstrap) - PRÓXIMAS SALIDAS
+===================================================== */
+function ensureDeparturesModal() {
+  let el = document.getElementById("tm-dep-modal");
+  if (el) return el;
+
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `
+    <div class="modal fade" id="tm-dep-modal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+
+          <div class="modal-header">
+            <h5 class="modal-title" id="tm-dep-modal-title">Próximas salidas (1 hora)</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+          </div>
+
+          <div class="modal-body">
+            <div id="tm-dep-modal-body" class="small"></div>
+            <div class="text-muted small mt-2">
+              ℹ️ “Salidas” se filtra solo por la próxima hora. El “retorno” mostrado es el próximo retorno aproximado.
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(wrap.firstElementChild);
+  return document.getElementById("tm-dep-modal");
+}
+
+function showDeparturesModal(html, now = new Date()) {
+  const modalEl = ensureDeparturesModal();
+  const titleEl = modalEl.querySelector("#tm-dep-modal-title");
+  const bodyEl = modalEl.querySelector("#tm-dep-modal-body");
+
+  titleEl.textContent = `Próximas salidas (desde ${hhmmNow(now)} hasta ${hhmmNow(new Date(now.getTime() + 60 * 60000))})`;
+  bodyEl.innerHTML = html;
+
+  const modal = window.bootstrap?.Modal?.getOrCreateInstance(modalEl, {
+    backdrop: true,
+    keyboard: true
+  });
+  modal?.show();
+}
+
+/* =====================================================
+   LIMPIEZA (más fuerte)
 ===================================================== */
 export function clearTransportLayers() {
-  stopPopupLiveUpdate();
-  clearTransportState();
+  try { stopPopupLiveUpdate(); } catch {}
+  try { clearTransportState(); } catch {}
+  // ✅ importante: algunas rutas (auto) se dibujan en capas globales
+  try { clearRoute?.(); } catch {}
 }
 
 /* =====================================================
@@ -136,11 +197,62 @@ function getParadaLatLng(p) {
   return [latitude, longitude];
 }
 
+// ✅ incluir: denominacion=parada + uso=fija/recorrido
 function isMarcadorVisible(p) {
   const d = String(p?.denominacion || "").toLowerCase().trim();
-  return d === "parada";
+  const uso = String(p?.uso || "").toLowerCase().trim();
+  return d === "parada" || uso === "fija" || uso === "recorrido";
 }
 
+function distMeters(a, b) {
+  return map.distance(a, b);
+}
+
+function findNearestCoordOnPath(point, coords) {
+  let best = null;
+  let min = Infinity;
+  for (const ll of coords) {
+    const d = distMeters(point, ll);
+    if (d < min) {
+      min = d;
+      best = ll;
+    }
+  }
+  return best ? { ll: best, d: min } : null;
+}
+
+function findNearestStop(point, stops) {
+  let best = null;
+  let min = Infinity;
+  for (const p of stops) {
+    const ll = getParadaLatLng(p);
+    if (!ll) continue;
+    const d = distMeters(point, ll);
+    if (d < min) {
+      min = d;
+      best = p;
+    }
+  }
+  return best ? { stop: best, ll: getParadaLatLng(best), d: min } : null;
+}
+
+function findNearestCoordIndex(coords, targetLL) {
+  if (!coords?.length || !targetLL) return -1;
+  let bestIdx = -1;
+  let min = Infinity;
+  for (let i = 0; i < coords.length; i++) {
+    const d = distMeters(coords[i], targetLL);
+    if (d < min) {
+      min = d;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+/* =====================================================
+   PREFIJOS + NUMERAL (como antes)
+===================================================== */
 function parseCodigoParts(codigo) {
   const c = String(codigo || "").trim().toLowerCase();
   const m = c.match(/^([a-z_]+?)(\d+)$/);
@@ -174,15 +286,18 @@ function sortByNumeralStable(arr) {
 }
 
 /**
- * Orden exacto por prefijos:
+ * ✅ orden por prefijos (guía principal) + numeral
  * IDA: pfi -> pfis -> prism -> resto
- * VUELTA: prvsm -> pfvsm/pfvs -> pfv -> resto
+ * VUELTA: prvsm -> pfvsm -> pfvs -> pfv -> resto
  */
 function buildOrderedStopsForLinea(paradasAll, sentido) {
   const s = normStr(sentido);
 
+  // Filtra por sentido (clave para no mezclar ida/vuelta)
+  const base = (Array.isArray(paradasAll) ? paradasAll : []).filter(p => normStr(p?.sentido) === s);
+
   const byPrefix = new Map();
-  for (const p of paradasAll) {
+  for (const p of base) {
     const pref = getPrefix(p);
     if (!byPrefix.has(pref)) byPrefix.set(pref, []);
     byPrefix.get(pref).push(p);
@@ -201,6 +316,7 @@ function buildOrderedStopsForLinea(paradasAll, sentido) {
     byPrefix.delete(pref);
   }
 
+  // resto de prefijos (para no “perder” paradas nuevas)
   const restPrefixes = [...byPrefix.keys()].sort((a, b) => a.localeCompare(b));
   for (const pref of restPrefixes) {
     const group = byPrefix.get(pref);
@@ -208,6 +324,7 @@ function buildOrderedStopsForLinea(paradasAll, sentido) {
     out.push(...sortByNumeralStable(group));
   }
 
+  // dedup por codigo
   const seen = new Set();
   const final = [];
   for (const p of out) {
@@ -221,7 +338,7 @@ function buildOrderedStopsForLinea(paradasAll, sentido) {
 }
 
 /**
- * finderuta=true SOLO en VUELTA
+ * finderuta=true SOLO en VUELTA => corta el listado allí
  */
 function cutStopsAtFinDeRuta(paradas, sentidoLower) {
   if (!Array.isArray(paradas) || !paradas.length) return [];
@@ -232,73 +349,8 @@ function cutStopsAtFinDeRuta(paradas, sentidoLower) {
   return paradas.slice(0, idx + 1);
 }
 
-function distMeters(a, b) {
-  return map.distance(a, b);
-}
-
-function findNearestCoordOnPath(userLoc, coords) {
-  let best = null;
-  let min = Infinity;
-  for (const ll of coords) {
-    const d = distMeters(userLoc, ll);
-    if (d < min) {
-      min = d;
-      best = ll;
-    }
-  }
-  return best ? { ll: best, d: min } : null;
-}
-
-function findNearestStop(userLoc, stops) {
-  let best = null;
-  let min = Infinity;
-  for (const p of stops) {
-    const ll = getParadaLatLng(p);
-    if (!ll) continue;
-    const d = distMeters(userLoc, ll);
-    if (d < min) {
-      min = d;
-      best = p;
-    }
-  }
-  return best ? { stop: best, ll: getParadaLatLng(best), d: min } : null;
-}
-
-function findNearestCoordIndex(coords, targetLL) {
-  if (!coords?.length || !targetLL) return -1;
-  let bestIdx = -1;
-  let min = Infinity;
-  for (let i = 0; i < coords.length; i++) {
-    const d = distMeters(coords[i], targetLL);
-    if (d < min) {
-      min = d;
-      bestIdx = i;
-    }
-  }
-  return bestIdx;
-}
-
 /* =====================================================
-   SENTIDO AUTO (IDA/VUELTA)
-===================================================== */
-function autoSentidoFromUserAndDestino({ userCanton, userParroquia, linea }) {
-  const uC = normStr(userCanton);
-  const uP = normStr(userParroquia);
-
-  const origenC = normStr(linea?.cantonorigen);
-  const origenP = normStr(linea?.parroquiaorigen);
-
-  const userEnOrigen =
-    (origenC && uC && origenC === uC) ||
-    (origenP && uP && origenP === uP);
-
-  if (!uC && !uP) return "ida";
-  if (userEnOrigen) return "ida";
-  return "vuelta";
-}
-
-/* =====================================================
-   HORARIO: escoger línea con salida más cercana a "now"
+   HORARIO: parse / generación
 ===================================================== */
 function parseHHMM(s) {
   const m = String(s || "").trim().match(/^(\d{1,2}):(\d{2})$/);
@@ -307,6 +359,13 @@ function parseHHMM(s) {
   const mm = Number(m[2]);
   if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
   return hh * 60 + mm;
+}
+
+function fmtHHMM(mins) {
+  const m = ((mins % (24 * 60)) + (24 * 60)) % (24 * 60);
+  const hh = String(Math.floor(m / 60)).padStart(2, "0");
+  const mm = String(m % 60).padStart(2, "0");
+  return `${hh}:${mm}`;
 }
 
 function nowMinutes(now = new Date()) {
@@ -322,12 +381,260 @@ function nextDepartureDeltaMin(linea, sentidoLower, now = new Date()) {
   const arr = (normStr(sentidoLower) === "vuelta") ? ret : ida;
   const times = arr.map(parseHHMM).filter(v => v != null).sort((a, b) => a - b);
 
-  if (!times.length) return 9999;
-
-  for (const t of times) {
-    if (t >= cur) return (t - cur);
+  if (times.length) {
+    for (const t of times) if (t >= cur) return (t - cur);
+    return (24 * 60 - cur) + times[0];
   }
-  return (24 * 60 - cur) + times[0];
+
+  // fallback por rango inicio/fin (si no hay lista)
+  const ini = parseHHMM(linea?.horario_inicio);
+  const fin = parseHHMM(linea?.horario_fin);
+  if (ini == null || fin == null) return 9999;
+
+  // si estamos antes del inicio, “próximo” es inicio
+  if (cur <= ini) return ini - cur;
+
+  // si estamos dentro, asumimos que puede salir “ya” (delta 0)
+  if (ini <= fin) {
+    if (cur <= fin) return 0;
+    return (24 * 60 - cur) + ini;
+  } else {
+    // cruza medianoche
+    if (cur >= ini || cur <= fin) return 0;
+    return ini - cur;
+  }
+}
+
+function getFreqMin(linea) {
+  const a = Number(linea?.frecuencia_min);
+  const b = Number(linea?.frecuencia_max);
+  if (Number.isFinite(a) && a > 0) return a;
+  if (Number.isFinite(b) && b > 0) return b;
+  return null;
+}
+
+/**
+ * Salidas “ida” en la próxima hora:
+ * - Si horario_ida existe: filtra lista
+ * - Si no: genera por horario_inicio/fin + frecuencia
+ */
+function departuresNextHour_Ida(linea, now = new Date(), windowMin = 60) {
+  const start = nowMinutes(now);
+  const end = start + windowMin;
+
+  const ida = Array.isArray(linea?.horario_ida) ? linea.horario_ida : [];
+  const list = ida.map(parseHHMM).filter(v => v != null).sort((a, b) => a - b);
+  if (list.length) {
+    // incluye solo dentro de ventana [start, end]
+    return list.filter(t => t >= start && t <= end).map(fmtHHMM);
+  }
+
+  // fallback: inicio/fin + freq
+  const ini = parseHHMM(linea?.horario_inicio);
+  const fin = parseHHMM(linea?.horario_fin);
+  const freq = getFreqMin(linea);
+
+  if (ini == null || fin == null) return [];
+  if (!freq) return []; // sin frecuencia no generamos “salidas”
+
+  const out = [];
+  const inWindow = (t) => t >= start && t <= end;
+
+  // caso simple (no cruza medianoche)
+  if (ini <= fin) {
+    // generar desde max(start, ini) redondeado hacia arriba al “paso”
+    let t = Math.max(start, ini);
+    // ajusta al múltiplo de freq desde ini
+    const k = Math.ceil((t - ini) / freq);
+    t = ini + k * freq;
+    while (t <= Math.min(end, fin)) {
+      if (inWindow(t)) out.push(fmtHHMM(t));
+      t += freq;
+    }
+    return out;
+  }
+
+  // cruza medianoche (ini..1440) U (0..fin)
+  // generamos solo la porción que cae en [start, end] (mismo día)
+  // si estamos antes de fin, está “activo” en madrugada
+  // si estamos después de ini, está “activo” de noche
+  const maxT = Math.min(end, 24 * 60 - 1);
+
+  // tramo noche
+  if (start >= ini) {
+    let t = start;
+    const k = Math.ceil((t - ini) / freq);
+    t = ini + k * freq;
+    while (t <= maxT) {
+      if (inWindow(t)) out.push(fmtHHMM(t));
+      t += freq;
+    }
+  } else {
+    // tramo madrugada (0..fin)
+    const maxM = Math.min(end, fin);
+    let t = start;
+    // aquí tomamos “0” como base para paso, aproximación
+    const k = Math.ceil((t - 0) / freq);
+    t = 0 + k * freq;
+    while (t <= maxM) {
+      if (inWindow(t)) out.push(fmtHHMM(t));
+      t += freq;
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Próximo retorno (vuelta) aproximado:
+ * - Si horario_retorno existe: toma el siguiente >= ahora
+ * - Si no: usa nextDepartureDeltaMin con sentido=vuelta y lo convierte a hora
+ */
+function nextReturnTime(linea, now = new Date()) {
+  const cur = nowMinutes(now);
+  const ret = Array.isArray(linea?.horario_retorno) ? linea.horario_retorno : [];
+  const list = ret.map(parseHHMM).filter(v => v != null).sort((a, b) => a - b);
+  if (list.length) {
+    const t = list.find(x => x >= cur);
+    if (t != null) return fmtHHMM(t);
+    return fmtHHMM(list[0]); // siguiente día
+  }
+
+  const d = nextDepartureDeltaMin(linea, "vuelta", now);
+  if (!Number.isFinite(d) || d >= 9999) return "";
+  return fmtHHMM(cur + d);
+}
+
+/* =====================================================
+   ✅ Paradas por lineasruralpasan (robusto)
+===================================================== */
+function normCode(x) {
+  const s = String(x ?? "").trim().toLowerCase();
+  return s.replace(/\s+/g, "").replace(/[-_]/g, "");
+}
+
+function extractCodesFromLineasruralpasan(p) {
+  const arr = Array.isArray(p?.lineasruralpasan) ? p.lineasruralpasan : [];
+  const out = [];
+  for (const it of arr) {
+    if (typeof it === "string" || typeof it === "number") {
+      out.push(normCode(it));
+      continue;
+    }
+    if (it && typeof it === "object") {
+      if (it.codigo != null) out.push(normCode(it.codigo));
+      else if (it.code != null) out.push(normCode(it.code));
+      else if (it.id != null) out.push(normCode(it.id));
+    }
+  }
+  return out;
+}
+
+async function getParadasRuralesByLineaPasan(codigoLinea) {
+  const code = normCode(codigoLinea);
+
+  const all = await getCollectionCache("paradas_rurales");
+  const arr = Array.isArray(all) ? all : [];
+
+  const filtered = arr.filter(p => {
+    if (!p?.activo) return false;
+    if (normStr(p?.tipo) !== "rural") return false;
+
+    const codes = extractCodesFromLineasruralpasan(p);
+    return codes.includes(code);
+  });
+
+  if (filtered.length) return filtered;
+
+  // fallback legacy
+  try {
+    const fb = await getParadasByLinea(String(codigoLinea || ""), { tipo: "rural", sentido: "Ida" });
+    return Array.isArray(fb) ? fb : [];
+  } catch {
+    return [];
+  }
+}
+
+/* =====================================================
+   OSRM: distancia de ruta (para escoger bajada con auto más corto)
+===================================================== */
+async function osrmRouteDistanceMeters(fromLL, toLL, profile = "driving") {
+  try {
+    const [lat1, lon1] = fromLL;
+    const [lat2, lon2] = toLL;
+    const url =
+      `https://router.project-osrm.org/route/v1/${encodeURIComponent(profile)}` +
+      `/${lon1},${lat1};${lon2},${lat2}?overview=false&alternatives=false&steps=false`;
+    const res = await fetch(url);
+    if (!res.ok) return Infinity;
+    const json = await res.json();
+    const d = json?.routes?.[0]?.distance;
+    return Number.isFinite(d) ? d : Infinity;
+  } catch {
+    return Infinity;
+  }
+}
+
+/* =====================================================
+   BOTÓN: próximas salidas (debajo del select sentido)
+===================================================== */
+function upsertDeparturesButton(container, lineas, ctx = {}) {
+  const extraWrap = container.querySelector("#linea-extra");
+  if (!extraWrap) return;
+
+  let btn = extraWrap.querySelector("#btn-next-departures");
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.id = "btn-next-departures";
+    btn.type = "button";
+    btn.className = "btn btn-primary w-100 mt-2 d-flex align-items-center justify-content-center gap-2";
+    btn.innerHTML = `🕐 <span>Ver próximas salidas de líneas</span>`;
+    extraWrap.appendChild(btn);
+  }
+
+  btn.onclick = async () => {
+    const now = new Date();
+    const rows = [];
+
+    // orden por “orden” si existe
+    const sorted = [...(Array.isArray(lineas) ? lineas : [])].sort((a, b) => (Number(a?.orden) || 0) - (Number(b?.orden) || 0));
+
+    for (const l of sorted) {
+      if (!l?.activo) continue;
+      if (normStr(l?.tipo) !== "rural") continue;
+
+      const salidas = departuresNextHour_Ida(l, now, 60); // SOLO salidas (ida)
+      if (!salidas.length) continue;
+
+      const retTxt = nextReturnTime(l, now);
+      const op = isLineOperatingNow(l, now);
+
+      rows.push(`
+        <div class="p-2 border rounded mb-2">
+          <div class="d-flex justify-content-between align-items-start gap-2">
+            <div>
+              <div style="font-weight:700">${l.codigo || ""} ${l.nombre ? `- ${l.nombre}` : ""}</div>
+              <div class="small text-muted">🧭 Sentido recomendado en popup de paradas (referencial)</div>
+            </div>
+            <span class="badge ${op ? "text-bg-success" : "text-bg-warning"}">${op ? "Operativa" : "Fuera de servicio"}</span>
+          </div>
+
+          <div class="mt-2">
+            <b>Salidas (ida) en la próxima hora:</b><br>
+            ${salidas.map(x => `<span class="badge text-bg-light border me-1 mb-1">${x}</span>`).join("")}
+          </div>
+
+          ${retTxt ? `<div class="mt-2"><b>Próximo retorno (vuelta) aprox.:</b> <span class="badge text-bg-secondary">${retTxt}</span></div>` : ""}
+        </div>
+      `);
+    }
+
+    const html = rows.length
+      ? rows.join("")
+      : `<div class="alert alert-warning py-2 mb-0">No hay salidas (ida) registradas en la próxima hora.</div>`;
+
+    showDeparturesModal(html, now);
+  };
 }
 
 /* =====================================================
@@ -368,7 +675,7 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
     });
 
   let currentLineaSel = null;
-  let sentidosCache = ["Ida", "Vuelta"];
+  const sentidosCache = ["Ida", "Vuelta"];
   let currentSentido = "";
 
   container.onchange = async (ev) => {
@@ -395,6 +702,9 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
         showCobertura: false,
         coberturas: [],
       });
+
+      // ✅ botón debajo del select sentido (queda dentro de #linea-extra)
+      upsertDeparturesButton(container, lineas, ctx);
       return;
     }
 
@@ -406,14 +716,16 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
       clearTransportLayers();
       currentSentido = sentidoSel;
 
-      if (!sentidoSel) {
-        renderLineaExtraControls(container, {
-          sentidos: sentidosCache,
-          showCobertura: false,
-          coberturas: [],
-        });
-        return;
-      }
+      renderLineaExtraControls(container, {
+        sentidos: sentidosCache,
+        showCobertura: false,
+        coberturas: [],
+      });
+
+      // ✅ vuelve a insertar botón debajo del select sentido
+      upsertDeparturesButton(container, lineas, ctx);
+
+      if (!sentidoSel) return;
 
       await mostrarRutaLinea(currentLineaSel, { sentido: currentSentido }, ctx);
       return;
@@ -422,7 +734,7 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
 }
 
 /* =====================================================
-   MOSTRAR RUTA (RURAL) - línea completa
+   MOSTRAR RUTA (RURAL) - manual (sin tocar)
 ===================================================== */
 export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   clearTransportLayers();
@@ -493,8 +805,6 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
 
 /* =====================================================
    🚌 MODO BUS (RURAL)
-   ✅ NUEVO: ctx.dryRun => calcular SIN dibujar
-   ✅ respeta ctx.preserveLayers
 ===================================================== */
 function llKey(ll) {
   if (!ll) return "";
@@ -513,10 +823,7 @@ function buildIndexByLatLng(coords) {
 export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {}) {
   if (!userLoc || !destPlace?.ubicacion) return null;
 
-  // ✅ NO limpiar en evaluación (preserveLayers)
-  if (!ctx?.preserveLayers) {
-    clearTransportLayers();
-  }
+  if (!ctx?.preserveLayers) clearTransportLayers();
 
   const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
@@ -528,10 +835,9 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     return null;
   }
 
-  // Si es dryRun, no creamos capas
-  let walkLayer = null;
   let routesGroup = null;
   let layerStops = null;
+  let walkLayer = null;
 
   if (!ctx?.dryRun) {
     walkLayer = L.layerGroup().addTo(map);
@@ -545,7 +851,15 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   }
 
   let best = null;
+
+  // peso de tiempo (min) en score
   const W_TIME = 12;
+
+  // sentidos a probar (si no viene, probamos ambos)
+  const reqSentido = normStr(ctx?.sentido || "auto");
+  const sentidosToTry = (reqSentido === "ida" || reqSentido === "vuelta") ? [reqSentido] : ["ida", "vuelta"];
+
+  const stopsCacheByLinea = new Map();
 
   for (let level = 0; level < LEVELS_RURAL; level++) {
     const maxBoard = RURAL_BOARD_STEPS[Math.min(level, RURAL_BOARD_STEPS.length - 1)];
@@ -554,129 +868,203 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     for (const linea of lineas) {
       if (!linea?.activo) continue;
 
-      const sentidoAuto = autoSentidoFromUserAndDestino({
-        userCanton: ctx?.canton,
-        userParroquia: ctx?.parroquia,
-        linea
-      });
-      const sentidoLower = normStr(sentidoAuto);
-
-      const paradasRaw = await getParadasByLinea(linea.codigo, {
-        ...ctx,
-        tipo: "rural",
-        sentido: sentidoAuto
-      });
-      if (!paradasRaw?.length) continue;
-
-      const ordered = buildOrderedStopsForLinea(paradasRaw, sentidoLower);
-      const paradas = cutStopsAtFinDeRuta(ordered, sentidoLower);
-
-      const coords = paradas.map(getParadaLatLng).filter(Boolean);
-      if (coords.length < 2) continue;
-
-      const visibles = paradas.filter(isMarcadorVisible);
-
-      const nearestStopUser = findNearestStop(userLoc, visibles);
-      const nearestCoordUser = findNearestCoordOnPath(userLoc, coords);
-
-      let boardLL = null;
-      let boardDist = Infinity;
-      let boardLabel = "";
-
-      if (nearestStopUser && nearestStopUser.d <= maxBoard && nearestStopUser.d <= MAX_WALK_TO_STOP_M) {
-        boardLL = nearestStopUser.ll;
-        boardDist = nearestStopUser.d;
-        boardLabel = "Parada";
-      } else if (nearestCoordUser && nearestCoordUser.d <= maxBoard) {
-        boardLL = nearestCoordUser.ll;
-        boardDist = nearestCoordUser.d;
-        boardLabel = "Punto de la ruta";
-      } else {
-        continue;
+      let baseStops = stopsCacheByLinea.get(linea.codigo);
+      if (!baseStops) {
+        baseStops = await getParadasRuralesByLineaPasan(linea.codigo);
+        stopsCacheByLinea.set(linea.codigo, baseStops || []);
       }
+      if (!baseStops?.length) continue;
 
-      const idxBoard = findNearestCoordIndex(coords, boardLL);
-      if (idxBoard < 0) continue;
+      for (const sentidoTry of sentidosToTry) {
+        const sentidoLower = normStr(sentidoTry);
 
-      const nearestStopDest = findNearestStop(destLoc, visibles);
-      const nearestCoordDest = findNearestCoordOnPath(destLoc, coords);
+        // ✅ vuelve a usar prefijos como guía principal
+        const ordered = buildOrderedStopsForLinea(baseStops, sentidoLower);
+        const paradas = cutStopsAtFinDeRuta(ordered, sentidoLower);
 
-      let alightLL = null;
-      let alightDistToDest = Infinity;
-      let alightLabel = "";
+        // coords = TODAS las paradas (para conectar consecutivas)
+        const coords = paradas.map(getParadaLatLng).filter(Boolean);
+        if (coords.length < 2) continue;
 
-      if (nearestStopDest && nearestStopDest.d <= maxDest) {
-        alightLL = nearestStopDest.ll;
-        alightDistToDest = nearestStopDest.d;
-        alightLabel = "Parada";
-      } else if (nearestCoordDest && nearestCoordDest.d <= maxDest) {
-        alightLL = nearestCoordDest.ll;
-        alightDistToDest = nearestCoordDest.d;
-        alightLabel = "Punto de la ruta";
-      } else {
-        continue;
-      }
+        const visibles = paradas.filter(isMarcadorVisible);
+        if (visibles.length < 2) continue;
 
-      let useAuto = false;
-      let finLL = null;
+        // ======================
+        // SUBIDA
+        // ======================
+        const nearestStopUser = findNearestStop(userLoc, visibles);
+        const nearestCoordUser = findNearestCoordOnPath(userLoc, coords);
 
-      if (alightDistToDest > MAX_WALK_TO_DEST_M && sentidoLower === "vuelta") {
-        const last = paradas[paradas.length - 1];
-        if (last?.finderuta === true) {
-          finLL = getParadaLatLng(last);
-          if (finLL) {
-            useAuto = true;
-            alightLL = finLL;
-            alightLabel = "Fin de ruta (finderuta)";
+        let boardLL = null;
+        let boardDist = Infinity;
+        let boardLabel = "";
+
+        if (nearestStopUser && nearestStopUser.d <= maxBoard) {
+          boardLL = nearestStopUser.ll;
+          boardDist = nearestStopUser.d;
+          boardLabel = "Parada";
+        } else if (nearestCoordUser && nearestCoordUser.d <= maxBoard) {
+          boardLL = nearestCoordUser.ll;
+          boardDist = nearestCoordUser.d;
+          boardLabel = "Punto de la ruta";
+        } else {
+          continue;
+        }
+
+        const idxBoard = findNearestCoordIndex(coords, boardLL);
+        if (idxBoard < 0) continue;
+
+        // ======================
+        // BAJADA (FIX CRÍTICO)
+        // ✅ buscar SOLO después de idxBoard para que NO se elija una bajada “antes”
+        // ======================
+        const candidates = [];
+        for (let i = idxBoard + 1; i < paradas.length; i++) {
+          const ll = getParadaLatLng(paradas[i]);
+          if (!ll) continue;
+
+          const dLine = distMeters(destLoc, ll);
+          if (dLine <= maxDest) {
+            candidates.push({ idx: i, ll, dLine, stop: paradas[i] });
           }
         }
+
+        // fallback: punto sobre ruta (después de subida)
+        if (!candidates.length) {
+          const nearestCoordDest = findNearestCoordOnPath(destLoc, coords.slice(idxBoard + 1));
+          if (!nearestCoordDest || nearestCoordDest.d > maxDest) continue;
+
+          // ojo: nearestCoordDest viene del slice, hay que ubicarlo en coords completo
+          const alightLL = nearestCoordDest.ll;
+          const idxAlight = findNearestCoordIndex(coords, alightLL);
+          if (idxAlight < 0) continue;
+          if (!(idxBoard < idxAlight)) continue;
+
+          const tramoCoords = coords.slice(idxBoard, idxAlight + 1);
+          if (tramoCoords.length < 2) continue;
+
+          let tramoDist = 0;
+          for (let j = 1; j < tramoCoords.length; j++) tramoDist += distMeters(tramoCoords[j - 1], tramoCoords[j]);
+
+          const dtMin = nextDepartureDeltaMin(linea, sentidoLower, now);
+
+          const walkToDest = nearestCoordDest.d;
+          const useAuto = walkToDest > WALK_AFTER_ALIGHT_M;
+
+          const extra = useAuto ? 0 : walkToDest;
+          const score = boardDist + extra + tramoDist + (dtMin * W_TIME);
+
+          const cand = {
+            linea,
+            sentido: sentidoTry,
+            sentidoLower,
+            paradas,
+            coords,
+            visibles,
+            boardLL,
+            boardDist,
+            boardLabel,
+            idxBoard,
+            alightLL,
+            alightLabel: "Punto de la ruta",
+            idxAlight,
+            tramoCoords,
+            fromIdx: idxBoard,
+            toIdx: idxAlight,
+            walkToDest,
+            useAuto,
+            dtMin,
+            score,
+            _driveMeters: Infinity
+          };
+
+          if (!best || cand.score < best.score) best = cand;
+          continue;
+        }
+
+        // top K candidatas
+        candidates.sort((a, b) => a.dLine - b.dLine);
+        const top = candidates.slice(0, Math.max(1, K_ALIGHT_CANDIDATES));
+
+        // si hay alguna <=700m => caminar (elige la más cercana)
+        let chosen = null;
+        const walkables = top.filter(x => x.dLine <= WALK_AFTER_ALIGHT_M);
+        if (walkables.length) {
+          chosen = walkables[0];
+        } else {
+          // ✅ escoger la que deje el AUTO más corto
+          let bestDrive = Infinity;
+          for (const c of top) {
+            const drive = await osrmRouteDistanceMeters(c.ll, destLoc, "driving");
+            const val = Number.isFinite(drive) ? drive : Infinity;
+            if (val < bestDrive) {
+              bestDrive = val;
+              chosen = { ...c, driveMeters: val };
+            }
+          }
+          if (!chosen) chosen = top[0]; // fallback
+        }
+
+        const alightLL = chosen.ll;
+        const idxAlight = chosen.idx;
+        if (!(idxBoard < idxAlight)) continue;
+
+        // ✅ tramo bus: SOLO hasta la bajada (aquí evitamos el bug de seguir dibujando)
+        const tramoCoords = coords.slice(idxBoard, idxAlight + 1);
+        if (tramoCoords.length < 2) continue;
+
+        let tramoDist = 0;
+        for (let j = 1; j < tramoCoords.length; j++) tramoDist += distMeters(tramoCoords[j - 1], tramoCoords[j]);
+
+        const dtMin = nextDepartureDeltaMin(linea, sentidoLower, now);
+
+        const walkToDest = chosen.dLine;
+        const useAuto = walkToDest > WALK_AFTER_ALIGHT_M;
+
+        const driveMeters = useAuto
+          ? (Number.isFinite(chosen.driveMeters) ? chosen.driveMeters : Infinity)
+          : Infinity;
+
+        const extra = useAuto ? 0 : walkToDest;
+
+        const score =
+          boardDist +
+          extra +
+          tramoDist +
+          (dtMin * W_TIME) +
+          (useAuto && Number.isFinite(driveMeters) ? (driveMeters * 0.35) : 0);
+
+        const cand = {
+          linea,
+          sentido: sentidoTry,
+          sentidoLower,
+
+          paradas,
+          coords,
+          visibles,
+
+          boardLL,
+          boardDist,
+          boardLabel,
+          idxBoard,
+
+          alightLL,
+          alightLabel: "Parada",
+          idxAlight,
+
+          tramoCoords,
+          fromIdx: idxBoard,
+          toIdx: idxAlight,
+
+          walkToDest,
+          useAuto,
+          dtMin,
+          score,
+          _driveMeters: driveMeters
+        };
+
+        if (!best || cand.score < best.score) best = cand;
       }
-
-      const idxAlight = findNearestCoordIndex(coords, alightLL);
-      if (idxAlight < 0) continue;
-
-      const fromIdx = Math.min(idxBoard, idxAlight);
-      const toIdx = Math.max(idxBoard, idxAlight);
-
-      const tramoCoords = coords.slice(fromIdx, toIdx + 1);
-      if (tramoCoords.length < 2) continue;
-
-      let tramoDist = 0;
-      for (let i = 1; i < tramoCoords.length; i++) tramoDist += distMeters(tramoCoords[i - 1], tramoCoords[i]);
-
-      const dtMin = nextDepartureDeltaMin(linea, sentidoLower, now);
-
-      const extra = useAuto ? 0 : alightDistToDest;
-      const score = boardDist + extra + tramoDist + (dtMin * W_TIME);
-
-      const cand = {
-        linea,
-        sentido: sentidoAuto,
-        sentidoLower,
-        paradas,
-        coords,
-        visibles,
-
-        boardLL,
-        boardDist,
-        boardLabel,
-        idxBoard,
-
-        alightLL,
-        alightLabel,
-        idxAlight,
-
-        tramoCoords,
-        fromIdx,
-        toIdx,
-
-        walkToDest: alightDistToDest,
-        useAuto,
-        dtMin,
-        score
-      };
-
-      if (!best || cand.score < best.score) best = cand;
     }
 
     if (best) break;
@@ -693,24 +1081,20 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     return null;
   }
 
-  // ✅ DRY RUN: retornar sin dibujar
+  // DRY RUN
   if (ctx?.dryRun) {
     const metrics = {
       walk1: best.boardDist || 0,
       walk2: best.useAuto ? 0 : (best.walkToDest || 0),
       stopsCount: Math.max(0, (best.toIdx - best.fromIdx))
     };
-    const score = Number.isFinite(best.score)
-      ? best.score
-      : (metrics.walk1 + metrics.walk2) + (metrics.stopsCount * 20) + (best.useAuto ? 800 : 0);
-
     return {
       tipo: "rural",
       linea: best.linea,
-      sentido: best.sentido,
+      sentido: titleCase(normStr(best.sentido)),
       useAuto: best.useAuto,
       metrics,
-      score
+      score: best.score
     };
   }
 
@@ -731,6 +1115,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     const idx = idxMap.get(llKey(ll));
     if (idx == null) continue;
 
+    // solo las del tramo
     if (idx < best.fromIdx || idx > best.toIdx) continue;
 
     const marker = L.circleMarker(ll, {
@@ -751,34 +1136,25 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   }
   setCurrentStopMarkers(stopMarkers);
 
+  // subir/bajar
   L.circleMarker(best.boardLL, {
     radius: 10, color: "#2e7d32", fillColor: "#2e7d32", fillOpacity: 1, weight: 3
-  })
-    .addTo(layerStops)
-    .bindPopup(
-      best.boardLabel === "Punto de la ruta"
-        ? `<b>✅ Subir aquí</b><br>Punto sobre la ruta (paradas lejos)`
-        : `<b>✅ Subir aquí</b><br>Parada cercana`
-    );
+  }).addTo(layerStops).bindPopup(`<b>✅ Subir aquí</b><br>${best.boardLabel}`);
 
   L.circleMarker(best.alightLL, {
     radius: 10, color: "#c62828", fillColor: "#c62828", fillOpacity: 1, weight: 3
-  })
-    .addTo(layerStops)
-    .bindPopup(`<b>⛔ Bajar aquí</b><br>${best.alightLabel}`);
+  }).addTo(layerStops).bindPopup(`<b>⛔ Bajar aquí</b><br>${best.alightLabel}`);
 
+  // caminata a subir
   await drawDashedAccessRoute(userLoc, best.boardLL, "#666");
 
+  // ✅ ruta bus SOLO hasta la bajada (fix principal)
   const ruralLine = await drawLineRouteFollowingStreets(best.tramoCoords, best.linea.color || "#000");
   if (ruralLine) routesGroup.addLayer(ruralLine);
 
+  // final: caminar si <=700, caso contrario auto
   if (best.useAuto) {
-    await drawRouteBetweenPoints({
-      from: best.alightLL,
-      to: destLoc,
-      mode: "driving",
-      dashed: false
-    });
+    await drawRouteBetweenPoints({ from: best.alightLL, to: destLoc, mode: "driving", dashed: false });
   } else {
     await drawDashedAccessRoute(best.alightLL, destLoc, "#666");
   }
@@ -790,7 +1166,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     ui.infoEl.innerHTML = `
       <b>Ruta (bus rural${best.useAuto ? " + auto" : ""})</b><br>
       🚌 Línea: <b>${best.linea.codigo}</b> - ${best.linea.nombre || ""}<br>
-      🧭 Sentido: <b>${best.sentido}</b><br>
+      🧭 Sentido: <b>${titleCase(normStr(best.sentido))}</b><br>
       ${op ? "✅ Operativa ahora" : "⛔ Fuera de servicio ahora"}<br>
       ${(() => {
         if (best.dtMin >= 9999) return `⏳ Próxima salida aprox.: <b>sin dato</b><br>`;
@@ -810,5 +1186,5 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   }
 
   map.fitBounds(L.latLngBounds([userLoc, destLoc, best.boardLL, best.alightLL]).pad(0.2));
-  return { tipo: "rural", linea: best.linea, sentido: best.sentido, useAuto: best.useAuto, score: best.score };
+  return { tipo: "rural", linea: best.linea, sentido: titleCase(normStr(best.sentido)), useAuto: best.useAuto, score: best.score };
 }
