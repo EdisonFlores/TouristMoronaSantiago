@@ -1,12 +1,5 @@
 /* ================= IMPORTS ================= */
-import { db } from "./services/firebase.js";
 import { reverseGeocodeNominatim } from "./services/nominatim.js";
-
-import {
-  getProvinciasConDatos,
-  getCantonesConDatos,
-  getParroquiasConDatos
-} from "./app/selects.js";
 
 import { findNearest } from "./app/actions.js";
 import { dataList, setUserLocation, getUserLocation } from "./app/state.js";
@@ -16,9 +9,7 @@ import {
   renderMarkers,
   clearMarkers,
   clearRoute,
-  drawRoute,
-  drawTwoLegOSRM,
-  drawRouteBetweenPoints
+  drawRoute
 } from "./map/map.js";
 
 import {
@@ -45,28 +36,19 @@ let detectedAdmin = {
 
 /**
  * ✅ Contexto lógico usado en filtros (puede diferir de fachada)
+ *    + entornoUser (nuevo)
  */
 let ctxGeo = {
   provincia: "",
   canton: "",
   parroquia: "",
-  specialSevilla: false
+  specialSevilla: false,
+  entornoUser: "" // "urbano" | "rural" | ""
 };
 
 /* ================= ELEMENTOS DEL DOM ================= */
-const provincia = document.getElementById("provincia");
-const canton = document.getElementById("canton");
-const parroquia = document.getElementById("parroquia");
 const category = document.getElementById("category");
 const extra = document.getElementById("extra-controls");
-
-/* ================= UX: ocultar selects base desde el inicio ================= */
-function hideBaseSelects() {
-  provincia?.classList?.add("d-none");
-  canton?.classList?.add("d-none");
-  parroquia?.classList?.add("d-none");
-}
-hideBaseSelects();
 
 /* ================= HELPERS ================= */
 function clearRouteInfo() {
@@ -99,8 +81,7 @@ function normLite(s) {
 
 /* =====================================================
    ✅ FALLBACK BD: detectar provincia/cantón/parroquia
-   por cercanía a docs existentes (si Nominatim falla)
-   Prioridad: lugar > paradas_transporte(tipo urbana) > paradas_rurales(tipo rural)
+   + (NUEVO) inferir entornoUser por cercanía
 ===================================================== */
 function llFromDoc(doc) {
   const u = doc?.ubicacion;
@@ -148,7 +129,7 @@ function isAdminUsable(a) {
 function passTypeFilter(source, doc) {
   const t = normLite(doc?.tipo);
 
-  // lugar: sin tipo
+  // lugar: sin tipo (o indiferente)
   if (source === "lugar") return true;
 
   // paradas_transporte: solo "urbana"
@@ -158,6 +139,62 @@ function passTypeFilter(source, doc) {
   if (source === "paradas_rurales") return t === "rural";
 
   return true;
+}
+
+/**
+ * ✅ Inferir ENTORNO por doc más cercano:
+ * - Si el doc es paradas_transporte => urbano
+ * - Si el doc es paradas_rurales   => rural
+ * - Si el doc es lugar y tiene entorno => usa ese
+ * - Si no hay nada, retorna ""
+ */
+async function inferEntornoFromDBByNearest(userLoc, opts = {}) {
+  const MAX_RADIUS_M = opts.maxRadiusM ?? 7000;
+
+  const sources = [
+    { name: "lugar",              priority: 1 },
+    { name: "paradas_transporte", priority: 2 },
+    { name: "paradas_rurales",    priority: 3 }
+  ];
+
+  let best = null;
+
+  for (const src of sources) {
+    const all = await getCollectionCache(src.name);
+    const arr = Array.isArray(all) ? all : [];
+
+    for (const doc of arr) {
+      if (doc?.activo === false) continue;
+      if (!passTypeFilter(src.name, doc)) continue;
+
+      const ll = llFromDoc(doc);
+      if (!ll) continue;
+
+      const d = map.distance(userLoc, ll);
+      if (d > MAX_RADIUS_M) continue;
+
+      const cand = { source: src.name, distM: d, priority: src.priority, doc };
+
+      if (!best) best = cand;
+      else {
+        const betterDist = cand.distM < best.distM;
+        const tie = Math.abs(cand.distM - best.distM) < 80;
+        const betterPriority = tie && cand.priority < best.priority;
+        if (betterDist || betterPriority) best = cand;
+      }
+    }
+  }
+
+  if (!best) return "";
+
+  if (best.source === "paradas_transporte") return "urbano";
+  if (best.source === "paradas_rurales") return "rural";
+
+  // lugar
+  const ent = normLite(best.doc?.entorno);
+  if (ent === "urbano" || ent === "rural") return ent;
+
+  return "";
 }
 
 async function inferAdminFromDBByNearest(userLoc, opts = {}) {
@@ -242,28 +279,11 @@ function showModal(title, html) {
   modal.show();
 }
 
-/* ================= TERMINAL DEL CANTÓN ACTUAL ================= */
-async function getUserCantonTerminal() {
-  const lugares = await getCollectionCache("lugar");
-
-  const provSel = ctxGeo.provincia;
-  const cantonSel = ctxGeo.canton;
-
-  return (
-    lugares.find(l => {
-      if (!l?.activo) return false;
-      if (String(l.provincia || "") !== String(provSel || "")) return false;
-      if (String(l.ciudad || "") !== String(cantonSel || "")) return false;
-      if (String(l.subcategoria || "").toLowerCase() !== "terminal") return false;
-      return true;
-    }) || null
-  );
-}
-
 /* ================= MAPA: LUGAR ÚNICO ================= */
 function showSinglePlace(place) {
   clearMarkers();
   renderMarkers([place], () => {
+    // en bus NO se dibuja ruta normal
     if (activeMode !== "bus") {
       drawRoute(getUserLocation(), place, activeMode, document.getElementById("route-info"));
     }
@@ -274,6 +294,7 @@ function showSinglePlace(place) {
 async function buildRoute() {
   if (!activePlace) return;
 
+  // ✅ limpieza fuerte
   clearRoute();
   clearTransportLayers();
   clearRouteInfo();
@@ -298,6 +319,7 @@ async function buildRoute() {
         canton: ctxGeo.canton,
         parroquia: ctxGeo.parroquia,
         specialSevilla: ctxGeo.specialSevilla,
+        entornoUser: ctxGeo.entornoUser, // ✅ NUEVO
         now: new Date()
       },
       { infoEl }
@@ -309,13 +331,12 @@ async function buildRoute() {
 }
 
 /* ================= GEOLOCALIZACIÓN ================= */
-const USE_TEST_LOCATION = false
+const USE_TEST_LOCATION = false;
 const TEST_LOCATION = [-2.384849, -78.116655];
 
 function showLocatingBanner() {
   if (!extra) return;
 
-  // ✅ banner "ubicando..." (azul)
   extra.innerHTML = `
     <div id="loc-banner" class="alert alert-info py-2 mb-2">
       📡 <b>Estamos ubicándote…</b><br>
@@ -324,7 +345,6 @@ function showLocatingBanner() {
   `;
 }
 
-/* ✅ UI de ubicación (reemplaza el banner azul por verde o rojo) */
 function showDetectedFacade() {
   if (!extra) return;
 
@@ -334,8 +354,8 @@ function showDetectedFacade() {
   const p = String(detectedAdmin?.provincia || "").trim();
   const c = String(detectedAdmin?.canton || "").trim();
   const pa = String(detectedAdmin?.parroquia || "").trim();
+  const ent = String(ctxGeo?.entornoUser || "").trim();
 
-  // 🔴 Si NO se pudo determinar por Nominatim ni por BD
   if (!p || !c) {
     banner.className = "alert alert-danger py-2 mb-2";
     banner.innerHTML = `
@@ -350,7 +370,6 @@ function showDetectedFacade() {
     return;
   }
 
-  // 🟢 Ubicación detectada
   banner.className = "alert alert-success py-2 mb-2";
   banner.innerHTML = `
     ✅ <b>Usted se encuentra en:</b><br>
@@ -362,7 +381,11 @@ function showDetectedFacade() {
         ? `<div class="small mt-1">⚠️ Caso especial Sevilla activo (Sevilla + Morona)</div>`
         : ""
     }
-    
+    ${
+      ent
+        ? `<div class="small mt-1">🧭 <b>Entorno detectado:</b> ${ent}</div>`
+        : `<div class="small mt-1">🧭 <b>Entorno detectado:</b> (no disponible)</div>`
+    }
   `;
 }
 
@@ -384,7 +407,6 @@ async function detectAdminFromLatLng(loc) {
   } catch (e) {
     console.warn("Nominatim falló. Usando fallback BD por cercanía.", e);
 
-    // ✅ FALLBACK BD
     const fromDB = await inferAdminFromDBByNearest(loc, {
       maxRadiusM: 7000,
       hardAcceptM: 1200
@@ -398,13 +420,15 @@ async function detectAdminFromLatLng(loc) {
       };
       console.log(`✅ ctxGeo inferido por ${fromDB._source} a ${Math.round(fromDB._distM)} m`, fromDB);
     } else {
-      // ❌ No se encontró nada: dejar admin vacío para que salga banner rojo
       admin = { provincia: "", canton: "", parroquia: "" };
       console.warn("❌ Fallback BD no encontró nada. Ubicación no determinable.");
     }
   }
 
-  // ✅ Caso especial Sevilla (aunque admin venga vacío no revienta)
+  // ✅ ENTORNO USER por cercanía (siempre intentamos, aun si admin sale vacío)
+  const entornoUser = await inferEntornoFromDBByNearest(loc, { maxRadiusM: 7000 });
+
+  // ✅ Caso especial Sevilla
   const anySevilla =
     normLite(admin.canton).includes("sevilla") ||
     normLite(admin.parroquia).includes("sevilla");
@@ -420,7 +444,8 @@ async function detectAdminFromLatLng(loc) {
       provincia: "Morona Santiago",
       canton: "Sevilla Don Bosco",
       parroquia: "Sevilla Don Bosco",
-      specialSevilla: true
+      specialSevilla: true,
+      entornoUser: entornoUser || "" // se intenta igual
     };
     return;
   }
@@ -435,7 +460,8 @@ async function detectAdminFromLatLng(loc) {
     provincia: detectedAdmin.provincia,
     canton: detectedAdmin.canton,
     parroquia: detectedAdmin.parroquia,
-    specialSevilla: false
+    specialSevilla: false,
+    entornoUser: entornoUser || ""
   };
 }
 
@@ -446,7 +472,7 @@ function enableCategoryUI() {
   category.value = "";
 }
 
-/* ✅ EJECUCIÓN ÚNICA (sin duplicado) */
+/* ✅ EJECUCIÓN ÚNICA */
 showLocatingBanner();
 
 if (USE_TEST_LOCATION) {
@@ -472,16 +498,12 @@ if (USE_TEST_LOCATION) {
     await detectAdminFromLatLng(loc);
     showDetectedFacade();
     enableCategoryUI();
-
   }, () => {
-    // si no hay geolocalización, reusar banner rojo
     const banner = document.getElementById("loc-banner");
     if (banner) {
       banner.className = "alert alert-danger py-2 mb-2";
-      banner.innerHTML = `
-        ❌ <b>No se pudo obtener tu ubicación.</b>
-      `;
-    } else {
+      banner.innerHTML = `❌ <b>No se pudo obtener tu ubicación.</b>`;
+    } else if (extra) {
       extra.innerHTML = `
         <div class="alert alert-danger py-2 mb-2">
           ❌ No se pudo obtener tu ubicación.
@@ -575,7 +597,7 @@ category.onchange = async () => {
   const parroquiaSel = ctxGeo.parroquia;
   const catSel = String(category.value || "").toLowerCase();
 
-  const base = lugares.filter(l => {
+  const base = (Array.isArray(lugares) ? lugares : []).filter(l => {
     if (!l?.activo) return false;
     if (String(l.provincia || "") !== String(provSel || "")) return false;
     if (String(l.subcategoria || "").toLowerCase() !== catSel) return false;
@@ -596,19 +618,26 @@ category.onchange = async () => {
 
   console.log(`📦 Lugares obtenidos (${catSel}):`, all);
 
-  if (!all.length) {
-    showModal(
-      "Sin datos",
-      `
-        <div class="alert alert-info py-2 mb-0">
-          <b>${provSel || "?"}</b> / <b>${cantonSel || "?"}</b> / <b>${parroquiaSel || "(sin parroquia detectada)"}</b><br>
-        </div>
-      `
-    );
-    extra.innerHTML = "";
-    return;
-  }
+ if (!all.length) {
+  showModal(
+    "📍 Sin cobertura por ahora",
+    `
+      <div class="alert alert-info py-2 mb-2">
+        <b>De momento no hay datos registrados en tu zona</b> para esta categoría.
+      </div>
 
+      <div class="small">
+        Estamos trabajando para ampliar la cobertura y añadir más lugares y rutas.
+        <br><br>
+        ✅ Puedes probar otra categoría o volver a intentarlo más tarde.
+      </div>
+    `
+  );
+  extra.innerHTML = "";
+  return;
+}
+
+  // orden
   all.sort((a, b) => {
     const aCity = String(a.ciudad || "");
     const bCity = String(b.ciudad || "");
@@ -663,12 +692,26 @@ category.onchange = async () => {
   });
 
   renderMarkers(dataList, place => {
+    // ✅ si estás en bus, limpia antes (evita restos si clickeas rápido)
+    if (activeMode === "bus") {
+      clearRoute();
+      clearTransportLayers();
+      clearRouteInfo();
+    }
+
     activePlace = place;
     showSinglePlace(place);
     buildRoute();
   });
 
   sel.onchange = () => {
+    // ✅ limpieza previa si bus
+    if (activeMode === "bus") {
+      clearRoute();
+      clearTransportLayers();
+      clearRouteInfo();
+    }
+
     activePlace = dataList[sel.value];
     if (!activePlace) return;
     showSinglePlace(activePlace);
@@ -676,6 +719,12 @@ category.onchange = async () => {
   };
 
   document.getElementById("near").onclick = () => {
+    if (activeMode === "bus") {
+      clearRoute();
+      clearTransportLayers();
+      clearRouteInfo();
+    }
+
     activePlace = findNearest(dataList);
     if (!activePlace) return;
     showSinglePlace(activePlace);
