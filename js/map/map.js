@@ -138,7 +138,7 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
   }
 }
 
-/* ================= NUEVO: ruta hacia un punto (destino manual) ================= */
+/* ================= ✅ FIX: ruta hacia un punto (destino manual) ================= */
 export async function drawRouteToPoint({ from, to, mode = "walking", infoBox = null, title = "Ruta" }) {
   if (!from || !to) return null;
 
@@ -162,16 +162,36 @@ export async function drawRouteToPoint({ from, to, mode = "walking", infoBox = n
   if (!data.routes?.length) return null;
 
   const r = data.routes[0];
-  routeLine = L.polyline(r.geometry.coordinates.map(c => [c[1], c[0]]), { color: "#1e88e5", weight: 5 })
-    .addTo(routeOverlay);
+
+  routeLine = L.polyline(
+    r.geometry.coordinates.map(c => [c[1], c[0]]),
+    { color: "#1e88e5", weight: 5 }
+  ).addTo(routeOverlay);
 
   map.fitBounds(routeLine.getBounds());
+
+  // ✅ MISMA lógica de tiempo que drawRoute()
+  const distanciaKm = (Number(r.distance) || 0) / 1000;
+
+  const velocidadPorModo = {
+    walking: 5,
+    cycling: 15,
+    bicycle: 15,
+    motorcycle: 35,
+    driving: 30
+  };
+
+  const usaTiempoOsrm = mode === "bus" || !velocidadPorModo[mode];
+
+  const tiempoSeg = usaTiempoOsrm
+    ? Math.round(Number(r.duration) || 0)
+    : Math.round((distanciaKm / velocidadPorModo[mode]) * 3600);
 
   if (infoBox) {
     infoBox.innerHTML = `
       <b>${title} (${mode})</b><br>
-      ⏱ ${formatDurationFromSeconds(Math.round(r.duration))}<br>
-      📏 ${(r.distance / 1000).toFixed(2)} km
+      ⏱ ${formatDurationFromSeconds(tiempoSeg)}<br>
+      📏 ${distanciaKm.toFixed(2)} km
     `;
   }
 

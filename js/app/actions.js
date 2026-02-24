@@ -1,7 +1,20 @@
 // js/app/actions.js
-import { setActivePlace, getUserLocation, setMode } from "./state.js";
+import { setActivePlace, getUserLocation, setMode, setUserLocation } from "./state.js";
 import { drawRoute, clearMarkers, renderMarkers, clearRoute } from "../map/map.js";
 import { clearTransportLayers, planAndShowBusStops } from "../transport/transport_controller.js";
+
+/** ✅ NUEVO: mutación centralizada */
+export function updateUserLocation(loc) {
+  setUserLocation(loc);
+}
+
+export function setTravelMode(mode) {
+  setMode(mode);
+}
+
+export function setActivePlaceAction(place) {
+  setActivePlace(place);
+}
 
 export function selectPlace(place, infoBox, ctxGeo = {}) {
   if (!place) return;
@@ -50,7 +63,6 @@ export function selectPlace(place, infoBox, ctxGeo = {}) {
           specialSevilla: ctxGeo.specialSevilla === true,
           entornoUser: ctxGeo.entornoUser || ctxGeo.entorno || "",
           now: new Date(),
-          // sentido en bus rural: auto por defecto (se comparan ida/vuelta)
           sentido: "auto"
         };
 

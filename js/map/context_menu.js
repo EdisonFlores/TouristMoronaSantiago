@@ -3,6 +3,7 @@ export function installMapContextMenu(map, handlers = {}) {
   const {
     onDirectionsFromHere = null,
     onDirectionsToHere = null,
+    onClearDirections = null, // ✅ NUEVO
     onCenterHere = null
   } = handlers || {};
 
@@ -62,11 +63,7 @@ export function installMapContextMenu(map, handlers = {}) {
     return hr;
   };
 
-  let lastLatLng = null;
-
   function show(containerPoint, latlng) {
-    lastLatLng = latlng;
-
     menu.innerHTML = "";
 
     if (typeof onDirectionsFromHere === "function") {
@@ -75,6 +72,12 @@ export function installMapContextMenu(map, handlers = {}) {
 
     if (typeof onDirectionsToHere === "function") {
       menu.appendChild(mkItem("🎯 Indicaciones hasta aquí", () => onDirectionsToHere(latlng)));
+    }
+
+    // ✅ NUEVO: quitar indicaciones
+    if (typeof onClearDirections === "function") {
+      menu.appendChild(sep());
+      menu.appendChild(mkItem("🧹 Quitar indicaciones", () => onClearDirections()));
     }
 
     if (typeof onCenterHere === "function") {
