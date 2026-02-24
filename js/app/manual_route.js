@@ -19,7 +19,7 @@ export function createManualRouting(deps) {
     refreshLayersOverlays,
     clearRouteInfo,
 
-    // ✅ NUEVO: detector por punto (admin+entorno)
+    // ✅ detector por punto (admin+entorno+cobertura)
     detectPointContext
   } = deps;
 
@@ -71,12 +71,62 @@ export function createManualRouting(deps) {
     });
   }
 
+  function isLatLngArr(x) {
+    return Array.isArray(x) && x.length === 2 && Number.isFinite(x[0]) && Number.isFinite(x[1]);
+  }
+
+  function isEntorno(x) {
+    return x === "urbano" || x === "rural";
+  }
+
+  function normStr(s) {
+    return String(s || "").trim().toLowerCase();
+  }
+
+  function sameAdmin(a = {}, b = {}) {
+    // compara provincia/cantón/parroquia (si parroquia falta en alguno, comparamos provincia/cantón)
+    const ap = normStr(a.provincia);
+    const ac = normStr(a.canton);
+    const aa = normStr(a.parroquia);
+
+    const bp = normStr(b.provincia);
+    const bc = normStr(b.canton);
+    const ba = normStr(b.parroquia);
+
+    if (!ap || !ac || !bp || !bc) return false; // si falta lo básico, asumimos mismatch
+    if (ap !== bp) return false;
+    if (ac !== bc) return false;
+
+    // parroquia opcional
+    if (!aa || !ba) return true;
+    return aa === ba;
+  }
+
+  function showNoCoverage(infoEl, msg = "De momento no hay datos registrados en la zona, pronto habrá cobertura.") {
+    if (!infoEl) return;
+    infoEl.innerHTML = `
+      <div class="alert alert-info py-2 mb-0">
+        <b>📍 Sin cobertura por ahora</b><br>
+        <div class="mt-1">${msg}</div>
+      </div>
+    `;
+  }
+
+  async function safeDetectPointContext(latlng) {
+    if (!detectPointContext || !isLatLngArr(latlng)) return null;
+    try {
+      return await detectPointContext(latlng);
+    } catch {
+      return null;
+    }
+  }
+
   async function buildRoute() {
     const infoEl = document.getElementById("route-info");
     const activePlace = getActivePlace?.();
 
     const hasBDPlace = !!activePlace?.ubicacion;
-    const hasManualDest = Array.isArray(manualDest) && manualDest.length === 2;
+    const hasManualDest = isLatLngArr(manualDest);
 
     if (!hasBDPlace && !hasManualDest) return;
 
@@ -85,22 +135,28 @@ export function createManualRouting(deps) {
     clearRouteInfo?.();
 
     const gpsUserLoc = getUserLoc?.();
-    const startLoc = (Array.isArray(manualStart) && manualStart.length === 2) ? manualStart : gpsUserLoc;
-    if (!startLoc) return;
+    const startLoc = isLatLngArr(manualStart) ? manualStart : gpsUserLoc;
+    if (!isLatLngArr(startLoc)) return;
 
     const destLoc = hasBDPlace
       ? [activePlace.ubicacion.latitude, activePlace.ubicacion.longitude]
       : manualDest;
 
-    // ✅ destino (si manual, le agregamos entorno luego)
-    const destPlace = hasBDPlace ? activePlace : {
-      nombre: "Destino seleccionado",
-      ubicacion: { latitude: destLoc[0], longitude: destLoc[1] }
-    };
+    if (!isLatLngArr(destLoc)) return;
+
+    // ✅ destino place (si manual, armamos un objeto compatible)
+    const destPlace = hasBDPlace
+      ? activePlace
+      : {
+          nombre: "Destino seleccionado",
+          ubicacion: { latitude: destLoc[0], longitude: destLoc[1] }
+        };
 
     const mode = getMode?.() || "walking";
 
-    // ========== ✅ BUS: detectar contexto real de start/dest ==========
+    // ================================
+    // ✅ BUS: contexto por ORIGEN/DESTINO (admin + entorno + cobertura)
+    // ================================
     if (mode === "bus") {
       if (infoEl) {
         infoEl.innerHTML = `
@@ -110,37 +166,76 @@ export function createManualRouting(deps) {
         `;
       }
 
-      // ctx base (del usuario actual detectado al inicio)
+      // ctx base (detectado al inicio con GPS)
       const ctxBase = getCtxGeo?.() || {};
 
-      // detect contexto del ORIGEN real (puede ser manualStart o GPS)
-      let startCtx = null;
-      try {
-        startCtx = await detectPointContext?.(startLoc);
-      } catch {}
+      // detectar contexto real del ORIGEN (manualStart o GPS)
+      const startCtx = await safeDetectPointContext(startLoc);
 
-      // detect contexto del DESTINO real (solo si es manualDest, si es BD ya puede traer entorno)
+      // detectar contexto real del DESTINO:
+      // - si es manual => siempre detectamos
+      // - si es BD => si ya tiene provincia/canton ok, si no detectamos por latlng para bus
       let destCtx = null;
+
+      const hasAdminInBDPlace =
+        !!(activePlace?.provincia && activePlace?.ciudad) ||
+        !!(activePlace?.provincia && activePlace?.canton);
+
       if (!hasBDPlace) {
-        try {
-          destCtx = await detectPointContext?.(destLoc);
-        } catch {}
+        destCtx = await safeDetectPointContext(destLoc);
+      } else {
+        if (!hasAdminInBDPlace) {
+          destCtx = await safeDetectPointContext(destLoc);
+        }
       }
 
-      // ✅ entorno del origen: si no se detecta, usa el de ctxBase
+      // ✅ Cobertura: si detectPointContext reporta hasCoverage=false, no intentamos planear bus
+      const startCoverage = (startCtx && typeof startCtx.hasCoverage === "boolean") ? startCtx.hasCoverage : true;
+      const destCoverage  = (destCtx  && typeof destCtx.hasCoverage  === "boolean") ? destCtx.hasCoverage  : true;
+
+      if (!startCoverage) {
+        showNoCoverage(infoEl, "No hay datos cercanos al <b>origen</b> seleccionado para planificar bus.");
+        return;
+      }
+      if (!destCoverage) {
+        showNoCoverage(infoEl, "No hay datos cercanos al <b>destino</b> seleccionado para planificar bus.");
+        return;
+      }
+
+      // ✅ entorno del origen (si no se detecta, fallback al ctxBase)
       const entornoUser =
-        (startCtx?.entornoPoint === "urbano" || startCtx?.entornoPoint === "rural")
+        isEntorno(startCtx?.entornoPoint)
           ? startCtx.entornoPoint
           : (ctxBase.entornoUser || "");
 
-      // ✅ contexto geográfico a usar para filtrar buses:
-      // si destino es manual y se detectó provincia/cantón, úsalo; si no, usa ctxBase.
-      const ctxForBus = (destCtx?.ctxGeoPoint?.provincia && destCtx?.ctxGeoPoint?.canton)
-        ? destCtx.ctxGeoPoint
-        : ctxBase;
+      // ✅ admin del destino:
+      // prioridad: destCtx.ctxGeoPoint -> activePlace admin -> ctxBase
+      const bdProv = activePlace?.provincia || "";
+      const bdCanton = activePlace?.canton || activePlace?.ciudad || "";
+      const bdParr = activePlace?.parroquia || "";
 
-      // ✅ entorno del destino: si destino manual y detectamos entorno, lo ponemos en destPlace
-      if (!hasBDPlace && (destCtx?.entornoPoint === "urbano" || destCtx?.entornoPoint === "rural")) {
+      const ctxDestDetected = destCtx?.ctxGeoPoint || null;
+
+      const ctxDestFromBD = (bdProv && bdCanton)
+        ? { provincia: bdProv, canton: bdCanton, parroquia: bdParr, specialSevilla: ctxBase.specialSevilla === true }
+        : null;
+
+      const ctxForBus =
+        (ctxDestDetected?.provincia && ctxDestDetected?.canton) ? ctxDestDetected :
+        (ctxDestFromBD?.provincia && ctxDestFromBD?.canton) ? ctxDestFromBD :
+        ctxBase;
+
+      // ✅ admin del origen (para comparar mismatch)
+      const ctxStartForCompare =
+        (startCtx?.ctxGeoPoint?.provincia && startCtx?.ctxGeoPoint?.canton)
+          ? startCtx.ctxGeoPoint
+          : ctxBase;
+
+      // ✅ si admin no coincide => permitir búsqueda sin filtro estricto
+      const adminMismatch = !sameAdmin(ctxStartForCompare, ctxForBus);
+
+      // ✅ entorno del destino (si destino manual y se detecta entorno, lo guardamos en destPlace)
+      if (!hasBDPlace && isEntorno(destCtx?.entornoPoint)) {
         destPlace.entorno = destCtx.entornoPoint;
       }
 
@@ -149,12 +244,23 @@ export function createManualRouting(deps) {
           startLoc,
           destPlace,
           {
+            // "tipo:auto" para que el planner decida urbano/rural
             tipo: "auto",
+
+            // contexto admin usado por los controladores/data
             provincia: ctxForBus.provincia || "",
             canton: ctxForBus.canton || "",
             parroquia: ctxForBus.parroquia || "",
-            specialSevilla: ctxForBus.specialSevilla === true,
+
+            // ✅ caso especial sevilla si aplica
+            specialSevilla: ctxForBus.specialSevilla === true || ctxBase.specialSevilla === true,
+
+            // ✅ entorno del “usuario” (origen real del cálculo)
             entornoUser,
+
+            // ✅ clave para cuando el origen/destino no coincide con el filtro del cantón/parroquia
+            ignoreGeoFilter: adminMismatch === true,
+
             now: new Date(),
             sentido: "auto"
           },
@@ -165,6 +271,7 @@ export function createManualRouting(deps) {
           infoEl.innerHTML = `
             <div class="alert alert-warning py-2 mb-0">
               ❌ No se encontró una ruta en bus para este destino.
+              ${adminMismatch ? `<div class="small mt-1">ℹ️ Nota: el origen y destino están en contextos distintos (provincia/cantón/parroquia).</div>` : ""}
             </div>
           `;
         }
@@ -182,9 +289,11 @@ export function createManualRouting(deps) {
       return;
     }
 
-    // ========== MODOS NORMALES ==========
+    // ================================
+    // MODOS NORMALES (walking/driving/etc.)
+    // ================================
     if (hasBDPlace) {
-      const isManualStart = Array.isArray(manualStart) && manualStart.length === 2;
+      const isManualStart = isLatLngArr(manualStart);
       if (isManualStart) {
         await drawRouteToPoint?.({ from: startLoc, to: destLoc, mode, infoBox: infoEl, title: "Ruta" });
         return;
