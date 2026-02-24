@@ -39,6 +39,7 @@ export function selectPlace(place, infoBox, ctxGeo = {}) {
       clearTransportLayers();
 
       const userLoc = getUserLocation();
+      if (!userLoc) return;
 
       if (mode === "bus") {
         const ctx = {
@@ -64,13 +65,15 @@ export function selectPlace(place, infoBox, ctxGeo = {}) {
 
 export function findNearest(list) {
   const userLoc = getUserLocation();
-  if (!userLoc || !list.length) return null;
+  if (!userLoc || !Array.isArray(list) || !list.length) return null;
 
   let nearest = null;
   let minDistance = Infinity;
 
   list.forEach(p => {
-    const { latitude, longitude } = p.ubicacion;
+    const { latitude, longitude } = p?.ubicacion || {};
+    if (typeof latitude !== "number" || typeof longitude !== "number") return;
+
     const d = L.latLng(userLoc).distanceTo([latitude, longitude]);
     if (d < minDistance) {
       minDistance = d;

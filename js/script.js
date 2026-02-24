@@ -6,10 +6,14 @@ import { dataList, setUserLocation, getUserLocation } from "./app/state.js";
 
 import {
   map,
+  baseLayers,
+  markersLayer,
+  routeOverlay,
   renderMarkers,
   clearMarkers,
   clearRoute,
-  drawRoute
+  drawRoute,
+  drawRouteToPoint
 } from "./map/map.js";
 
 import {
@@ -21,9 +25,25 @@ import {
 import { getLineasByTipoAll, isLineOperatingNow } from "./transport/core/transport_data.js";
 import { getCollectionCache } from "./app/cache_db.js";
 
+import { getStopsLayer, getRouteLayer, getAccessLayer } from "./transport/core/transport_state.js";
+
+import { installMapContextMenu } from "./map/context_menu.js";
+import { initLayersUI } from "./map/layers_ui.js";
+import { shouldShowVisitMorona, applyVisitMorona } from "./app/virtual_visit.js";
+
 /* ================= ESTADO GLOBAL ================= */
 let activePlace = null;
 let activeMode = "walking";
+
+// ✅ destino manual (click derecho)
+let manualDest = null; // [lat, lng]
+let manualDestMarker = null;
+
+// ✅ marker de ubicación (para recenter)
+let userMarker = null;
+
+// UI layers controller handler
+let layersUI = null;
 
 /**
  * ✅ Fachada detectada (solo UI)
@@ -35,8 +55,7 @@ let detectedAdmin = {
 };
 
 /**
- * ✅ Contexto lógico usado en filtros (puede diferir de fachada)
- *    + entornoUser (nuevo)
+ * ✅ Contexto lógico usado en filtros
  */
 let ctxGeo = {
   provincia: "",
@@ -62,6 +81,17 @@ function resetMap() {
   clearTransportLayers();
   clearRouteInfo();
   activePlace = null;
+  // ✅ NO borramos manualDest automáticamente al cambiar de categoría
+  // (pero si quieres que se borre, descomenta lo siguiente)
+  // clearManualDest();
+}
+
+function clearManualDest() {
+  manualDest = null;
+  if (manualDestMarker) {
+    try { map.removeLayer(manualDestMarker); } catch {}
+    manualDestMarker = null;
+  }
 }
 
 function titleCaseWords(s) {
@@ -80,8 +110,7 @@ function normLite(s) {
 }
 
 /* =====================================================
-   ✅ FALLBACK BD: detectar provincia/cantón/parroquia
-   + (NUEVO) inferir entornoUser por cercanía
+   ✅ FALLBACK BD + entorno
 ===================================================== */
 function llFromDoc(doc) {
   const u = doc?.ubicacion;
@@ -113,7 +142,7 @@ function normalizeAdminFromDoc(source, doc) {
     return {
       provincia: String(doc?.provincia || ""),
       canton: String(doc?.canton || ""),
-      parroquia: String(doc?.ciudad || "") // paradas_transporte.ciudad = parroquia/sector
+      parroquia: String(doc?.ciudad || "")
     };
   }
 
@@ -129,25 +158,12 @@ function isAdminUsable(a) {
 function passTypeFilter(source, doc) {
   const t = normLite(doc?.tipo);
 
-  // lugar: sin tipo (o indiferente)
   if (source === "lugar") return true;
-
-  // paradas_transporte: solo "urbana"
   if (source === "paradas_transporte") return t === "urbana";
-
-  // paradas_rurales: solo "rural"
   if (source === "paradas_rurales") return t === "rural";
-
   return true;
 }
 
-/**
- * ✅ Inferir ENTORNO por doc más cercano:
- * - Si el doc es paradas_transporte => urbano
- * - Si el doc es paradas_rurales   => rural
- * - Si el doc es lugar y tiene entorno => usa ese
- * - Si no hay nada, retorna ""
- */
 async function inferEntornoFromDBByNearest(userLoc, opts = {}) {
   const MAX_RADIUS_M = opts.maxRadiusM ?? 7000;
 
@@ -190,7 +206,6 @@ async function inferEntornoFromDBByNearest(userLoc, opts = {}) {
   if (best.source === "paradas_transporte") return "urbano";
   if (best.source === "paradas_rurales") return "rural";
 
-  // lugar
   const ent = normLite(best.doc?.entorno);
   if (ent === "urbano" || ent === "rural") return ent;
 
@@ -198,7 +213,7 @@ async function inferEntornoFromDBByNearest(userLoc, opts = {}) {
 }
 
 async function inferAdminFromDBByNearest(userLoc, opts = {}) {
-  const MAX_RADIUS_M = opts.maxRadiusM ?? 7000;  // tolerante (zona rural)
+  const MAX_RADIUS_M = opts.maxRadiusM ?? 7000;
   const HARD_ACCEPT_M = opts.hardAcceptM ?? 1200;
 
   const sources = [
@@ -228,7 +243,6 @@ async function inferAdminFromDBByNearest(userLoc, opts = {}) {
 
       const cand = { admin, distM: d, source: src.name, priority: src.priority };
 
-      // ✅ si está MUY cerca -> aceptar inmediato
       if (d <= HARD_ACCEPT_M) {
         return { ...cand.admin, _source: cand.source, _distM: cand.distM };
       }
@@ -283,23 +297,66 @@ function showModal(title, html) {
 function showSinglePlace(place) {
   clearMarkers();
   renderMarkers([place], () => {
-    // en bus NO se dibuja ruta normal
     if (activeMode !== "bus") {
       drawRoute(getUserLocation(), place, activeMode, document.getElementById("route-info"));
     }
   });
 }
 
-/* ================= RUTA (modo normal vs bus) ================= */
-async function buildRoute() {
-  if (!activePlace) return;
+/* ================= UI: controles de ruteo (para destino manual) ================= */
+function ensureRouteControlsForManual() {
+  if (!extra) return;
 
-  // ✅ limpieza fuerte
+  // si ya existe route-info/modes, no recrear
+  const has = document.querySelector("[data-mode]") && document.getElementById("route-info");
+  if (has) return;
+
+  extra.innerHTML = `
+    <div class="btn-group w-100 mb-2">
+      <button class="btn btn-outline-primary" data-mode="walking">🚶</button>
+      <button class="btn btn-outline-primary" data-mode="bicycle">🚴</button>
+      <button class="btn btn-outline-primary" data-mode="motorcycle">🏍️</button>
+      <button class="btn btn-outline-primary" data-mode="driving">🚗</button>
+      <button class="btn btn-outline-primary" data-mode="bus">🚌</button>
+    </div>
+    <div id="route-info" class="small"></div>
+  `;
+
+  document.querySelectorAll("[data-mode]").forEach(btn => {
+    btn.onclick = () => {
+      activeMode = btn.dataset.mode;
+      buildRoute();
+    };
+  });
+}
+
+/* ================= RUTA (BD vs destino manual) ================= */
+async function buildRoute() {
+  const infoEl = document.getElementById("route-info");
+
+  const hasBDPlace = !!activePlace?.ubicacion;
+  const hasManual = Array.isArray(manualDest) && manualDest.length === 2;
+
+  if (!hasBDPlace && !hasManual) return;
+
+  // limpieza fuerte
   clearRoute();
   clearTransportLayers();
   clearRouteInfo();
 
-  const infoEl = document.getElementById("route-info");
+  const userLoc = getUserLocation();
+  if (!userLoc) return;
+
+  // destino final
+  const destLoc = hasBDPlace
+    ? [activePlace.ubicacion.latitude, activePlace.ubicacion.longitude]
+    : manualDest;
+
+  // destino como “place” para planner bus (si manual)
+  const destPlace = hasBDPlace ? activePlace : {
+    nombre: "Destino seleccionado",
+    ubicacion: { latitude: destLoc[0], longitude: destLoc[1] }
+  };
 
   if (activeMode === "bus") {
     if (infoEl) {
@@ -311,32 +368,44 @@ async function buildRoute() {
     }
 
     await planAndShowBusStops(
-      getUserLocation(),
-      activePlace,
+      userLoc,
+      destPlace,
       {
         tipo: "auto",
         provincia: ctxGeo.provincia,
         canton: ctxGeo.canton,
         parroquia: ctxGeo.parroquia,
         specialSevilla: ctxGeo.specialSevilla,
-        entornoUser: ctxGeo.entornoUser, // ✅ NUEVO
-        now: new Date()
+        entornoUser: ctxGeo.entornoUser,
+        now: new Date(),
+        sentido: "auto"
       },
       { infoEl }
     );
     return;
   }
 
-  drawRoute(getUserLocation(), activePlace, activeMode, infoEl);
+  // modos normales: si es BD, usa drawRoute; si es manual, drawRouteToPoint
+  if (hasBDPlace) {
+    drawRoute(userLoc, activePlace, activeMode, infoEl);
+    return;
+  }
+
+  await drawRouteToPoint({
+    from: userLoc,
+    to: destLoc,
+    mode: activeMode,
+    infoBox: infoEl,
+    title: "Ruta"
+  });
 }
 
 /* ================= GEOLOCALIZACIÓN ================= */
-const USE_TEST_LOCATION = false;
-const TEST_LOCATION = [-2.384849, -78.116655];
+const USE_TEST_LOCATION = true;
+const TEST_LOCATION = [-2.534954, -78.163476];
 
 function showLocatingBanner() {
   if (!extra) return;
-
   extra.innerHTML = `
     <div id="loc-banner" class="alert alert-info py-2 mb-2">
       📡 <b>Estamos ubicándote…</b><br>
@@ -357,16 +426,43 @@ function showDetectedFacade() {
   const ent = String(ctxGeo?.entornoUser || "").trim();
 
   if (!p || !c) {
-    banner.className = "alert alert-danger py-2 mb-2";
+    banner.className = "alert alert-info py-2 mb-2";
     banner.innerHTML = `
-      ❌ <b>No se pudo determinar tu ubicación</b><br>
+      <b>📍 Sin cobertura por ahora</b><br>
       <div class="mt-1">
-        No hay lugares/paradas registrados cerca de la zona en la que te encuentras.
+        De momento no hay datos registrados en la zona, pronto habrá cobertura.
       </div>
-      <div class="small mt-1">
-        Pronto ampliaremos la cobertura.
+      <div class="mt-2 tm-visit-box">
+        <div class="small mb-2">Mientras tanto, puedes explorar Morona:</div>
+        <button id="btn-visit-morona" class="btn btn-primary w-100">
+          🧭 Visitar Morona
+        </button>
       </div>
     `;
+
+    // botón “Visitar Morona”
+    const btn = document.getElementById("btn-visit-morona");
+    if (btn) {
+      btn.onclick = async () => {
+        applyVisitMorona({
+          setUserLocation,
+          map,
+          onAfterSet: async (loc) => {
+            setUserMarker(loc, true);
+            await detectAdminFromLatLng(loc);
+            showDetectedFacade();
+            enableCategoryUI();
+            refreshLayersOverlays();
+          }
+        });
+      };
+    }
+
+    // ocultar categoría si no hay cobertura real
+    if (category) {
+      category.disabled = true;
+      category.classList.add("d-none");
+    }
     return;
   }
 
@@ -387,6 +483,34 @@ function showDetectedFacade() {
         : `<div class="small mt-1">🧭 <b>Entorno detectado:</b> (no disponible)</div>`
     }
   `;
+
+  // si está fuera de Morona, mostramos botón “Visitar Morona” como extra
+  if (shouldShowVisitMorona(ctxGeo)) {
+    banner.innerHTML += `
+      <div class="mt-2 tm-visit-box">
+        <div class="small mb-2">Explorar Morona sin moverte:</div>
+        <button id="btn-visit-morona" class="btn btn-outline-primary w-100">
+          🧭 Visitar Morona
+        </button>
+      </div>
+    `;
+    const btn = document.getElementById("btn-visit-morona");
+    if (btn) {
+      btn.onclick = async () => {
+        applyVisitMorona({
+          setUserLocation,
+          map,
+          onAfterSet: async (loc) => {
+            setUserMarker(loc, true);
+            await detectAdminFromLatLng(loc);
+            showDetectedFacade();
+            enableCategoryUI();
+            refreshLayersOverlays();
+          }
+        });
+      };
+    }
+  }
 }
 
 async function detectAdminFromLatLng(loc) {
@@ -421,14 +545,12 @@ async function detectAdminFromLatLng(loc) {
       console.log(`✅ ctxGeo inferido por ${fromDB._source} a ${Math.round(fromDB._distM)} m`, fromDB);
     } else {
       admin = { provincia: "", canton: "", parroquia: "" };
-      console.warn("❌ Fallback BD no encontró nada. Ubicación no determinable.");
+      console.warn("❌ Fallback BD no encontró nada.");
     }
   }
 
-  // ✅ ENTORNO USER por cercanía (siempre intentamos, aun si admin sale vacío)
   const entornoUser = await inferEntornoFromDBByNearest(loc, { maxRadiusM: 7000 });
 
-  // ✅ Caso especial Sevilla
   const anySevilla =
     normLite(admin.canton).includes("sevilla") ||
     normLite(admin.parroquia).includes("sevilla");
@@ -445,7 +567,7 @@ async function detectAdminFromLatLng(loc) {
       canton: "Sevilla Don Bosco",
       parroquia: "Sevilla Don Bosco",
       specialSevilla: true,
-      entornoUser: entornoUser || "" // se intenta igual
+      entornoUser: entornoUser || ""
     };
     return;
   }
@@ -472,8 +594,91 @@ function enableCategoryUI() {
   category.value = "";
 }
 
+/* ================= Map: marker de usuario ================= */
+function setUserMarker(loc, open = false) {
+  try {
+    if (userMarker) map.removeLayer(userMarker);
+  } catch {}
+  userMarker = L.marker(loc).addTo(map).bindPopup("📍 Tu ubicación");
+  if (open) userMarker.openPopup();
+}
+
+/* ================= Capas: overlays dinámicos ================= */
+function refreshLayersOverlays() {
+  if (!layersUI) return;
+
+  const overlays = {
+    "📌 Lugares": markersLayer,
+    "🧭 Ruta": routeOverlay
+  };
+
+  // overlays transporte (si existen)
+  const tStops = getStopsLayer?.();
+  const tRoute = getRouteLayer?.();
+  const tAcc = getAccessLayer?.();
+
+  if (tStops) overlays["🚌 Paradas (bus)"] = tStops;
+  if (tRoute) overlays["🚌 Ruta (bus)"] = tRoute;
+  if (tAcc) overlays["🚶 Accesos (bus)"] = tAcc;
+
+  layersUI.updateOverlays(overlays);
+}
+
+/* ================= Context menu (click derecho) ================= */
+function setManualDestination(latlng) {
+  if (!latlng) return;
+
+  manualDest = [latlng.lat, latlng.lng];
+
+  // marcador visible
+  if (manualDestMarker) {
+    try { map.removeLayer(manualDestMarker); } catch {}
+  }
+  manualDestMarker = L.marker(manualDest).addTo(map)
+    .bindPopup("🎯 Destino seleccionado")
+    .openPopup();
+
+  // si eliges destino manual, “suplantas” destino BD
+  activePlace = null;
+  clearMarkers();
+
+  // asegurar que el panel tenga modos para enrutar
+  ensureRouteControlsForManual();
+
+  buildRoute();
+}
+
+/* ================= Layers UI init (base layers + overlays + mi ubicación + leyenda) ================= */
+function initMapControls() {
+  if (layersUI) return;
+
+  layersUI = initLayersUI({
+    map,
+    baseLayers,
+    overlays: {
+      "📌 Lugares": markersLayer,
+      "🧭 Ruta": routeOverlay
+    },
+    onMyLocation: () => {
+      const loc = getUserLocation();
+      if (!loc) return;
+      map.setView(loc, 14);
+      if (userMarker) userMarker.openPopup();
+    }
+  });
+
+  refreshLayersOverlays();
+
+  // menú contextual tipo OSM
+  installMapContextMenu(map, {
+    onDirectionsToHere: (latlng) => setManualDestination(latlng),
+    onCenterHere: (latlng) => map.setView(latlng, map.getZoom())
+  });
+}
+
 /* ✅ EJECUCIÓN ÚNICA */
 showLocatingBanner();
+initMapControls();
 
 if (USE_TEST_LOCATION) {
   (async () => {
@@ -481,11 +686,14 @@ if (USE_TEST_LOCATION) {
     setUserLocation(loc);
 
     map.setView(loc, 13);
-    L.marker(loc).addTo(map).bindPopup("🧪 Ubicación de prueba").openPopup();
+    setUserMarker(loc, true);
 
     await detectAdminFromLatLng(loc);
     showDetectedFacade();
-    enableCategoryUI();
+    if (String(detectedAdmin?.provincia || "").trim() && String(detectedAdmin?.canton || "").trim()) {
+      enableCategoryUI();
+    }
+    refreshLayersOverlays();
   })();
 } else {
   navigator.geolocation.getCurrentPosition(async pos => {
@@ -493,22 +701,46 @@ if (USE_TEST_LOCATION) {
     setUserLocation(loc);
 
     map.setView(loc, 14);
-    L.marker(loc).addTo(map).bindPopup("📍 Tu ubicación").openPopup();
+    setUserMarker(loc, true);
 
     await detectAdminFromLatLng(loc);
     showDetectedFacade();
-    enableCategoryUI();
+
+    if (String(detectedAdmin?.provincia || "").trim() && String(detectedAdmin?.canton || "").trim()) {
+      enableCategoryUI();
+    }
+
+    refreshLayersOverlays();
   }, () => {
     const banner = document.getElementById("loc-banner");
     if (banner) {
-      banner.className = "alert alert-danger py-2 mb-2";
-      banner.innerHTML = `❌ <b>No se pudo obtener tu ubicación.</b>`;
-    } else if (extra) {
-      extra.innerHTML = `
-        <div class="alert alert-danger py-2 mb-2">
-          ❌ No se pudo obtener tu ubicación.
+      banner.className = "alert alert-info py-2 mb-2";
+      banner.innerHTML = `
+        <b>📍 Sin cobertura por ahora</b><br>
+        <div class="mt-1">De momento no hay datos registrados en la zona, pronto habrá cobertura.</div>
+        <div class="mt-2 tm-visit-box">
+          <div class="small mb-2">Mientras tanto, puedes explorar Morona:</div>
+          <button id="btn-visit-morona" class="btn btn-primary w-100">
+            🧭 Visitar Morona
+          </button>
         </div>
       `;
+      const btn = document.getElementById("btn-visit-morona");
+      if (btn) {
+        btn.onclick = async () => {
+          applyVisitMorona({
+            setUserLocation,
+            map,
+            onAfterSet: async (loc2) => {
+              setUserMarker(loc2, true);
+              await detectAdminFromLatLng(loc2);
+              showDetectedFacade();
+              enableCategoryUI();
+              refreshLayersOverlays();
+            }
+          });
+        };
+      }
     }
   });
 }
@@ -583,6 +815,8 @@ category.onchange = async () => {
         ignoreGeoFilter: (tipo === "rural" && ctxGeo.specialSevilla),
         now
       });
+
+      refreshLayersOverlays();
     };
 
     return;
@@ -618,24 +852,21 @@ category.onchange = async () => {
 
   console.log(`📦 Lugares obtenidos (${catSel}):`, all);
 
- if (!all.length) {
-  showModal(
-    "📍 Sin cobertura por ahora",
-    `
-      <div class="alert alert-info py-2 mb-2">
-        <b>De momento no hay datos registrados en tu zona</b> para esta categoría.
-      </div>
-
-      <div class="small">
-        Estamos trabajando para ampliar la cobertura y añadir más lugares y rutas.
-        <br><br>
-        ✅ Puedes probar otra categoría o volver a intentarlo más tarde.
-      </div>
-    `
-  );
-  extra.innerHTML = "";
-  return;
-}
+  if (!all.length) {
+    showModal(
+      "📍 Sin cobertura por ahora",
+      `
+        <div class="alert alert-info py-2 mb-2">
+          <b>De momento no hay datos registrados en la zona</b> para esta categoría.
+        </div>
+        <div class="small">
+          Pronto habrá cobertura. Puedes probar otra categoría.
+        </div>
+      `
+    );
+    extra.innerHTML = "";
+    return;
+  }
 
   // orden
   all.sort((a, b) => {
@@ -692,30 +923,34 @@ category.onchange = async () => {
   });
 
   renderMarkers(dataList, place => {
-    // ✅ si estás en bus, limpia antes (evita restos si clickeas rápido)
     if (activeMode === "bus") {
       clearRoute();
       clearTransportLayers();
       clearRouteInfo();
     }
+
+    clearManualDest(); // ✅ si escoges un lugar, anulamos destino manual
 
     activePlace = place;
     showSinglePlace(place);
     buildRoute();
+    refreshLayersOverlays();
   });
 
   sel.onchange = () => {
-    // ✅ limpieza previa si bus
     if (activeMode === "bus") {
       clearRoute();
       clearTransportLayers();
       clearRouteInfo();
     }
+
+    clearManualDest();
 
     activePlace = dataList[sel.value];
     if (!activePlace) return;
     showSinglePlace(activePlace);
     buildRoute();
+    refreshLayersOverlays();
   };
 
   document.getElementById("near").onclick = () => {
@@ -725,16 +960,20 @@ category.onchange = async () => {
       clearRouteInfo();
     }
 
+    clearManualDest();
+
     activePlace = findNearest(dataList);
     if (!activePlace) return;
     showSinglePlace(activePlace);
     buildRoute();
+    refreshLayersOverlays();
   };
 
   document.querySelectorAll("[data-mode]").forEach(btn => {
     btn.onclick = () => {
       activeMode = btn.dataset.mode;
       buildRoute();
+      refreshLayersOverlays();
     };
   });
 };

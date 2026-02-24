@@ -1,6 +1,7 @@
 // js/transport/transport_controller.js
-import { clearRoute } from "../map/map.js";
+import { clearRoute, map as leafletMap } from "../map/map.js"; // ✅ FIX: importar map
 import { clearTransportState } from "./core/transport_state.js";
+import { getCollectionCache } from "../app/cache_db.js";
 
 // Controladores (selector "Líneas de transporte")
 import { cargarLineasTransporte as cargarUrbano } from "./urbano/urbano_controller.js";
@@ -40,12 +41,75 @@ function decidePreferredTipo(entornoUser, entornoDest) {
   return "";
 }
 
+// ✅ NUEVO: cobertura bus mínima (paradas cerca de user o destino)
+function llFromStop(p) {
+  const u = p?.ubicacion;
+  const { latitude, longitude } = u || {};
+  if (typeof latitude !== "number" || typeof longitude !== "number") return null;
+  return [latitude, longitude];
+}
+
+function distMeters(map, a, b) {
+  try { return map.distance(a, b); } catch { return Infinity; }
+}
+
+/**
+ * Retorna true si hay al menos UNA parada relevante cerca de user o destino.
+ * - urbano: paradas_transporte tipo urbana
+ * - rural : paradas_rurales tipo rural
+ */
+export async function hasBusCoverage({ map, userLoc, destLoc, radiusUrb = 2200, radiusRur = 4200 } = {}) {
+  if (!map || !userLoc || !destLoc) return false;
+
+  const urbanoAll = await getCollectionCache("paradas_transporte");
+  const ruralAll  = await getCollectionCache("paradas_rurales");
+
+  const urbano = (Array.isArray(urbanoAll) ? urbanoAll : [])
+    .filter(p => p?.activo && String(p?.tipo || "").toLowerCase().trim() === "urbana");
+
+  const rural = (Array.isArray(ruralAll) ? ruralAll : [])
+    .filter(p => p?.activo && String(p?.tipo || "").toLowerCase().trim() === "rural");
+
+  const nearAny = (arr, rad) => {
+    for (const p of arr) {
+      const ll = llFromStop(p);
+      if (!ll) continue;
+      const d1 = distMeters(map, userLoc, ll);
+      const d2 = distMeters(map, destLoc, ll);
+      if (d1 <= rad || d2 <= rad) return true;
+    }
+    return false;
+  };
+
+  const okU = nearAny(urbano, radiusUrb);
+  const okR = nearAny(rural, radiusRur);
+  return okU || okR;
+}
+
 export async function planAndShowBusStops(userLoc, destPlace, ctx = {}, ui = {}) {
   if (!userLoc || !destPlace?.ubicacion) return null;
 
+  const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
+
+  // ✅ PRECHECK cobertura mínima
+  const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
+
+  // ✅ FIX: pasar el map real (Leaflet) en vez de undefined
+  const ok = await hasBusCoverage({ map: leafletMap, userLoc, destLoc });
+
+  if (!ok) {
+    if (ui?.infoEl) {
+      ui.infoEl.innerHTML = `
+        <div class="alert alert-info py-2 mb-0">
+          De momento no hay datos registrados en la zona para planificar <b>bus</b>. Pronto habrá cobertura.
+        </div>
+      `;
+    }
+    return null;
+  }
+
   if (!ctx?.preserveLayers) clearTransportLayers();
 
-  const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
   const entornoUser = ctx?.entornoUser;
   const entornoDest = destPlace?.entorno;
   const preferred = decidePreferredTipo(entornoUser, entornoDest);

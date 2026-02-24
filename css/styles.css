@@ -93,3 +93,75 @@ body {
   from { transform: translateY(0); }
   to   { transform: translateY(-10px); }
 }
+/* =========================
+   CONTEXT MENU (tipo OSM)
+========================= */
+.tm-cm{
+  background: var(--card);
+  color: var(--text);
+}
+
+/* =========================
+   BOTÓN MAPA: MI UBICACIÓN
+========================= */
+.tm-map-btn{
+  background: var(--card);
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 12px;
+  width: 42px;
+  height: 42px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.16);
+  cursor: pointer;
+}
+[data-theme="dark"] .tm-map-btn{
+  border: 1px solid rgba(255,255,255,0.14);
+}
+
+/* =========================
+   LEYENDA
+========================= */
+.tm-legend{
+  background: var(--card);
+  color: var(--text);
+  border-radius: 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(0,0,0,0.10);
+  box-shadow: 0 8px 20px rgba(0,0,0,0.18);
+  min-width: 180px;
+  font-size: 13px;
+}
+[data-theme="dark"] .tm-legend{
+  border: 1px solid rgba(255,255,255,0.12);
+}
+.tm-legend-title{
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.tm-legend-row{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+.tm-dot{
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  display: inline-block;
+}
+.tm-dot-route{ background: #1e88e5; }
+.tm-dot-access{ background: #444; }
+.tm-dot-stops{ background: #2e7d32; }
+
+/* =========================
+   VISITAR MORONA (panel)
+========================= */
+.tm-visit-box{
+  background: var(--card);
+  border: 1px dashed rgba(0,0,0,0.25);
+  border-radius: 14px;
+  padding: 12px;
+}
+[data-theme="dark"] .tm-visit-box{
+  border: 1px dashed rgba(255,255,255,0.25);
+}

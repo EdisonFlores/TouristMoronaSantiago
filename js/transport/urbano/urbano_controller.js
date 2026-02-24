@@ -412,7 +412,8 @@ function resaltarYConectarParadaMasCercana(paradas, linea) {
 
 /* =====================================================
    🚌 MODO BUS: planner URBANO
-   ✅ NUEVO: ctx.dryRun => calcular SIN dibujar
+   ✅ ctx.dryRun => calcular SIN dibujar
+   ✅ FIX NUEVO: dibujar línea del tramo bus (unir pathStops)
 ===================================================== */
 async function drawWalkOSRM(layerGroup, fromLatLng, toLatLng) {
   const profile = "foot";
@@ -429,6 +430,18 @@ async function drawWalkOSRM(layerGroup, fromLatLng, toLatLng) {
   const line = L.polyline(coords, { weight: 4, dashArray: "6 10" }).addTo(layerGroup);
 
   return { line, route };
+}
+
+function pathStopsToLatLngs(pathStops) {
+  const out = [];
+  for (const s of (Array.isArray(pathStops) ? pathStops : [])) {
+    const u = s?.ubicacion;
+    if (!u) continue;
+    const { latitude, longitude } = u;
+    if (typeof latitude !== "number" || typeof longitude !== "number") continue;
+    out.push([latitude, longitude]);
+  }
+  return out;
 }
 
 export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {}) {
@@ -592,6 +605,22 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   const boardLL = [best.boardStop.ubicacion.latitude, best.boardStop.ubicacion.longitude];
   const alightLL = [best.alightStop.ubicacion.latitude, best.alightStop.ubicacion.longitude];
 
+  // ====== FIX NUEVO: DIBUJAR LA LÍNEA DEL TRAMO BUS (pathStops) ======
+  // Une paradas en orden desde subida -> bajada (siguiendo calles OSRM)
+  try {
+    const tramoLatLngs = pathStopsToLatLngs(best.pathStops);
+
+    if (tramoLatLngs.length >= 2) {
+      const color = bestLinea.color || "#0d6efd";
+      const lineLayer = await drawLineRouteFollowingStreets(tramoLatLngs, color);
+      setRouteLayer(lineLayer);
+    }
+  } catch (e) {
+    console.warn("No se pudo dibujar la línea del tramo bus (urbano):", e);
+  }
+  // ================================================================
+
+  // Paradas intermedias del tramo
   if (Array.isArray(best.pathStops) && best.pathStops.length) {
     best.pathStops.forEach(p => {
       const { latitude, longitude } = p.ubicacion || {};
