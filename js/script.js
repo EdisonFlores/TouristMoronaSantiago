@@ -39,6 +39,10 @@ let activeMode = "walking";
 let manualDest = null; // [lat, lng]
 let manualDestMarker = null;
 
+// ✅ origen manual (click derecho: "Indicaciones desde aquí")
+let manualStart = null; // [lat, lng]
+let manualStartMarker = null;
+
 // ✅ marker de ubicación (para recenter)
 let userMarker = null;
 
@@ -81,9 +85,8 @@ function resetMap() {
   clearTransportLayers();
   clearRouteInfo();
   activePlace = null;
-  // ✅ NO borramos manualDest automáticamente al cambiar de categoría
-  // (pero si quieres que se borre, descomenta lo siguiente)
-  // clearManualDest();
+  clearManualDest();
+  clearManualStart();
 }
 
 function clearManualDest() {
@@ -91,6 +94,14 @@ function clearManualDest() {
   if (manualDestMarker) {
     try { map.removeLayer(manualDestMarker); } catch {}
     manualDestMarker = null;
+  }
+}
+
+function clearManualStart() {
+  manualStart = null;
+  if (manualStartMarker) {
+    try { map.removeLayer(manualStartMarker); } catch {}
+    manualStartMarker = null;
   }
 }
 
@@ -303,11 +314,10 @@ function showSinglePlace(place) {
   });
 }
 
-/* ================= UI: controles de ruteo (para destino manual) ================= */
+/* ================= UI: controles de ruteo (manual) ================= */
 function ensureRouteControlsForManual() {
   if (!extra) return;
 
-  // si ya existe route-info/modes, no recrear
   const has = document.querySelector("[data-mode]") && document.getElementById("route-info");
   if (has) return;
 
@@ -326,33 +336,39 @@ function ensureRouteControlsForManual() {
     btn.onclick = () => {
       activeMode = btn.dataset.mode;
       buildRoute();
+      refreshLayersOverlays();
     };
   });
 }
 
-/* ================= RUTA (BD vs destino manual) ================= */
+/* ================= RUTA (BD vs manual) ================= */
 async function buildRoute() {
   const infoEl = document.getElementById("route-info");
 
   const hasBDPlace = !!activePlace?.ubicacion;
-  const hasManual = Array.isArray(manualDest) && manualDest.length === 2;
+  const hasManualDest = Array.isArray(manualDest) && manualDest.length === 2;
 
-  if (!hasBDPlace && !hasManual) return;
+  if (!hasBDPlace && !hasManualDest) return;
 
-  // limpieza fuerte
+  // limpieza fuerte antes de dibujar
   clearRoute();
   clearTransportLayers();
   clearRouteInfo();
 
-  const userLoc = getUserLocation();
-  if (!userLoc) return;
+  // ✅ ORIGEN: si existe manualStart, suplantamos ubicación del usuario
+  const gpsUserLoc = getUserLocation();
+  const startLoc = (Array.isArray(manualStart) && manualStart.length === 2)
+    ? manualStart
+    : gpsUserLoc;
 
-  // destino final
+  if (!startLoc) return;
+
+  // ✅ DESTINO final
   const destLoc = hasBDPlace
     ? [activePlace.ubicacion.latitude, activePlace.ubicacion.longitude]
     : manualDest;
 
-  // destino como “place” para planner bus (si manual)
+  // para planner bus (si destino manual)
   const destPlace = hasBDPlace ? activePlace : {
     nombre: "Destino seleccionado",
     ubicacion: { latitude: destLoc[0], longitude: destLoc[1] }
@@ -368,7 +384,7 @@ async function buildRoute() {
     }
 
     await planAndShowBusStops(
-      userLoc,
+      startLoc,
       destPlace,
       {
         tipo: "auto",
@@ -385,14 +401,22 @@ async function buildRoute() {
     return;
   }
 
-  // modos normales: si es BD, usa drawRoute; si es manual, drawRouteToPoint
+  // modos normales:
   if (hasBDPlace) {
-    drawRoute(userLoc, activePlace, activeMode, infoEl);
+    // drawRoute usa gps userLoc (del state), pero nosotros queremos startLoc
+    // ✅ por eso: si startLoc es manual, usamos drawRouteToPoint
+    const isManualStart = Array.isArray(manualStart) && manualStart.length === 2;
+    if (isManualStart) {
+      await drawRouteToPoint({ from: startLoc, to: destLoc, mode: activeMode, infoBox: infoEl, title: "Ruta" });
+      return;
+    }
+
+    drawRoute(startLoc, activePlace, activeMode, infoEl);
     return;
   }
 
   await drawRouteToPoint({
-    from: userLoc,
+    from: startLoc,
     to: destLoc,
     mode: activeMode,
     infoBox: infoEl,
@@ -401,8 +425,8 @@ async function buildRoute() {
 }
 
 /* ================= GEOLOCALIZACIÓN ================= */
-const USE_TEST_LOCATION = true;
-const TEST_LOCATION = [-2.534954, -78.163476];
+const USE_TEST_LOCATION = false;
+const TEST_LOCATION = [-2.53624, -78.16309];
 
 function showLocatingBanner() {
   if (!extra) return;
@@ -425,6 +449,45 @@ function showDetectedFacade() {
   const pa = String(detectedAdmin?.parroquia || "").trim();
   const ent = String(ctxGeo?.entornoUser || "").trim();
 
+  // ✅ helper: botón único "Explorar Morona"
+  const renderExploreMoronaButton = (variant = "primary") => `
+    <div class="mt-2 tm-visit-box">
+      <div class="small mb-2">Mientras tanto, puedes explorar Morona:</div>
+      <button id="btn-explore-morona" class="btn btn-${variant} w-100">
+        🧭 Explorar Morona
+      </button>
+    </div>
+  `;
+
+  // ✅ helper: enganchar click y forzar entorno fijo
+  const wireExploreMorona = () => {
+    const btn = document.getElementById("btn-explore-morona");
+    if (!btn) return;
+
+    btn.onclick = async () => {
+      applyVisitMorona({
+        setUserLocation,
+        map,
+        onAfterSet: async (loc /*, meta opcional */) => {
+          setUserMarker(loc, true);
+
+          // detecta admin normal (prov/cant/parr)
+          await detectAdminFromLatLng(loc);
+
+          // ✅ entorno fijo para "Explorar Morona"
+          ctxGeo.entornoUser = "urbano";
+
+          showDetectedFacade();
+          enableCategoryUI();
+          refreshLayersOverlays();
+        }
+      });
+    };
+  };
+
+  // =====================================================
+  // SIN COBERTURA (no tenemos provincia/cantón)
+  // =====================================================
   if (!p || !c) {
     banner.className = "alert alert-info py-2 mb-2";
     banner.innerHTML = `
@@ -432,31 +495,10 @@ function showDetectedFacade() {
       <div class="mt-1">
         De momento no hay datos registrados en la zona, pronto habrá cobertura.
       </div>
-      <div class="mt-2 tm-visit-box">
-        <div class="small mb-2">Mientras tanto, puedes explorar Morona:</div>
-        <button id="btn-visit-morona" class="btn btn-primary w-100">
-          🧭 Visitar Morona
-        </button>
-      </div>
+      ${renderExploreMoronaButton("primary")}
     `;
 
-    // botón “Visitar Morona”
-    const btn = document.getElementById("btn-visit-morona");
-    if (btn) {
-      btn.onclick = async () => {
-        applyVisitMorona({
-          setUserLocation,
-          map,
-          onAfterSet: async (loc) => {
-            setUserMarker(loc, true);
-            await detectAdminFromLatLng(loc);
-            showDetectedFacade();
-            enableCategoryUI();
-            refreshLayersOverlays();
-          }
-        });
-      };
-    }
+    wireExploreMorona();
 
     // ocultar categoría si no hay cobertura real
     if (category) {
@@ -466,6 +508,9 @@ function showDetectedFacade() {
     return;
   }
 
+  // =====================================================
+  // CON COBERTURA
+  // =====================================================
   banner.className = "alert alert-success py-2 mb-2";
   banner.innerHTML = `
     ✅ <b>Usted se encuentra en:</b><br>
@@ -484,32 +529,11 @@ function showDetectedFacade() {
     }
   `;
 
-  // si está fuera de Morona, mostramos botón “Visitar Morona” como extra
+  // ✅ Mostrar "Explorar Morona" SOLO si NO estás en Morona ni Sevilla Don Bosco
+  // (usa shouldShowVisitMorona tal como lo definiste, pero ya con el concepto de "Explorar")
   if (shouldShowVisitMorona(ctxGeo)) {
-    banner.innerHTML += `
-      <div class="mt-2 tm-visit-box">
-        <div class="small mb-2">Explorar Morona sin moverte:</div>
-        <button id="btn-visit-morona" class="btn btn-outline-primary w-100">
-          🧭 Visitar Morona
-        </button>
-      </div>
-    `;
-    const btn = document.getElementById("btn-visit-morona");
-    if (btn) {
-      btn.onclick = async () => {
-        applyVisitMorona({
-          setUserLocation,
-          map,
-          onAfterSet: async (loc) => {
-            setUserMarker(loc, true);
-            await detectAdminFromLatLng(loc);
-            showDetectedFacade();
-            enableCategoryUI();
-            refreshLayersOverlays();
-          }
-        });
-      };
-    }
+    banner.innerHTML += renderExploreMoronaButton("outline-primary");
+    wireExploreMorona();
   }
 }
 
@@ -612,7 +636,6 @@ function refreshLayersOverlays() {
     "🧭 Ruta": routeOverlay
   };
 
-  // overlays transporte (si existen)
   const tStops = getStopsLayer?.();
   const tRoute = getRouteLayer?.();
   const tAcc = getAccessLayer?.();
@@ -624,13 +647,33 @@ function refreshLayersOverlays() {
   layersUI.updateOverlays(overlays);
 }
 
-/* ================= Context menu (click derecho) ================= */
+/* ================= Context menu: origen/destino manual ================= */
+function setManualStartPoint(latlng) {
+  if (!latlng) return;
+
+  manualStart = [latlng.lat, latlng.lng];
+
+  if (manualStartMarker) {
+    try { map.removeLayer(manualStartMarker); } catch {}
+  }
+  manualStartMarker = L.marker(manualStart).addTo(map)
+    .bindPopup("📍 Origen seleccionado")
+    .openPopup();
+
+  // Al elegir origen manual: NO borramos destino, puede existir
+  // Pero sí aseguramos que haya controles y redibujamos si ya hay destino
+  ensureRouteControlsForManual();
+
+  // si había un lugar seleccionado, lo dejamos (puede ser destino BD)
+  buildRoute();
+  refreshLayersOverlays();
+}
+
 function setManualDestination(latlng) {
   if (!latlng) return;
 
   manualDest = [latlng.lat, latlng.lng];
 
-  // marcador visible
   if (manualDestMarker) {
     try { map.removeLayer(manualDestMarker); } catch {}
   }
@@ -638,17 +681,18 @@ function setManualDestination(latlng) {
     .bindPopup("🎯 Destino seleccionado")
     .openPopup();
 
-  // si eliges destino manual, “suplantas” destino BD
+  // Si eliges destino manual, anulamos destino BD (como tenías)
   activePlace = null;
   clearMarkers();
 
-  // asegurar que el panel tenga modos para enrutar
+  // ✅ IMPORTANTE: al dar “Indicaciones hasta aquí” se deben activar modos
   ensureRouteControlsForManual();
 
   buildRoute();
+  refreshLayersOverlays();
 }
 
-/* ================= Layers UI init (base layers + overlays + mi ubicación + leyenda) ================= */
+/* ================= Layers UI init ================= */
 function initMapControls() {
   if (layersUI) return;
 
@@ -669,14 +713,15 @@ function initMapControls() {
 
   refreshLayersOverlays();
 
-  // menú contextual tipo OSM
+  // ✅ menú contextual estilo OSM: desde / hasta / centrar
   installMapContextMenu(map, {
+    onDirectionsFromHere: (latlng) => setManualStartPoint(latlng),
     onDirectionsToHere: (latlng) => setManualDestination(latlng),
     onCenterHere: (latlng) => map.setView(latlng, map.getZoom())
   });
 }
 
-/* ✅ EJECUCIÓN ÚNICA */
+/* ✅ EJECUCIÓN */
 showLocatingBanner();
 initMapControls();
 
@@ -923,13 +968,13 @@ category.onchange = async () => {
   });
 
   renderMarkers(dataList, place => {
-    if (activeMode === "bus") {
-      clearRoute();
-      clearTransportLayers();
-      clearRouteInfo();
-    }
+    // ✅ limpieza al seleccionar
+    clearRoute();
+    clearTransportLayers();
+    clearRouteInfo();
 
-    clearManualDest(); // ✅ si escoges un lugar, anulamos destino manual
+    clearManualDest();
+    clearManualStart();
 
     activePlace = place;
     showSinglePlace(place);
@@ -938,13 +983,12 @@ category.onchange = async () => {
   });
 
   sel.onchange = () => {
-    if (activeMode === "bus") {
-      clearRoute();
-      clearTransportLayers();
-      clearRouteInfo();
-    }
+    clearRoute();
+    clearTransportLayers();
+    clearRouteInfo();
 
     clearManualDest();
+    clearManualStart();
 
     activePlace = dataList[sel.value];
     if (!activePlace) return;
@@ -954,13 +998,12 @@ category.onchange = async () => {
   };
 
   document.getElementById("near").onclick = () => {
-    if (activeMode === "bus") {
-      clearRoute();
-      clearTransportLayers();
-      clearRouteInfo();
-    }
+    clearRoute();
+    clearTransportLayers();
+    clearRouteInfo();
 
     clearManualDest();
+    clearManualStart();
 
     activePlace = findNearest(dataList);
     if (!activePlace) return;
