@@ -19,12 +19,17 @@ baseLayers["OSM (Standard)"].addTo(map);
 // ===== Overlays principales =====
 export const markersLayer = L.layerGroup().addTo(map);
 
-// ✅ capa de rutas “no-transporte” (para poder toggle desde Layers Control)
+// ✅ capa de rutas “no-transporte”
 export const routeOverlay = L.layerGroup().addTo(map);
 
-let routeLine = null;            // ruta simple
-let routeLines = [];             // rutas extra (multi / admin)
+// ✅ NUEVO: capa EXCLUSIVA para transporte (bus / acceso / auto final de rural si lo usas)
+export const transportOverlay = L.layerGroup().addTo(map);
+
+let routeLine = null;            // ruta simple (NORMAL)
+let routeLines = [];             // rutas extra (NORMAL)
 let markerSelected = null;
+
+let transportLines = [];         // rutas OSRM dibujadas por TRANSPORTE (si las usas)
 
 /* ================= LIMPIEZA ================= */
 export function clearMarkers() {
@@ -32,6 +37,7 @@ export function clearMarkers() {
 }
 
 export function clearRoute() {
+  // ✅ solo limpia lo “normal”
   if (routeLine) {
     try { routeOverlay.removeLayer(routeLine); } catch {}
     routeLine = null;
@@ -46,6 +52,18 @@ export function clearRoute() {
     try { routeOverlay.removeLayer(markerSelected); } catch {}
     markerSelected = null;
   }
+}
+
+// ✅ NUEVO: limpia SOLO lo de transporte
+export function clearTransportRoute() {
+  if (transportLines.length) {
+    transportLines.forEach(l => {
+      try { transportOverlay.removeLayer(l); } catch {}
+    });
+    transportLines = [];
+  }
+  // por seguridad (si algún controlador metió layers directo ahí)
+  try { transportOverlay.clearLayers(); } catch {}
 }
 
 /* ================= MARKERS ================= */
@@ -68,7 +86,7 @@ export function renderMarkers(list, onSelect) {
   });
 }
 
-/* ================= RUTAS (1 tramo - tu función original) ================= */
+/* ================= RUTAS (1 tramo - normal) ================= */
 export async function drawRoute(userLoc, place, mode, infoBox) {
   if (!userLoc || !place?.ubicacion) return;
 
@@ -138,7 +156,7 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
   }
 }
 
-/* ================= ✅ FIX: ruta hacia un punto (destino manual) ================= */
+/* ================= ruta hacia un punto (normal) ================= */
 export async function drawRouteToPoint({ from, to, mode = "walking", infoBox = null, title = "Ruta" }) {
   if (!from || !to) return null;
 
@@ -170,7 +188,6 @@ export async function drawRouteToPoint({ from, to, mode = "walking", infoBox = n
 
   map.fitBounds(routeLine.getBounds());
 
-  // ✅ MISMA lógica de tiempo que drawRoute()
   const distanciaKm = (Number(r.distance) || 0) / 1000;
 
   const velocidadPorModo = {
@@ -198,7 +215,7 @@ export async function drawRouteToPoint({ from, to, mode = "walking", infoBox = n
   return r;
 }
 
-/* ================= utilidades para rutas entre puntos (tu código) ================= */
+/* ================= utilidades OSRM ================= */
 function modeToProfile(mode) {
   return ({
     walking: "foot",
@@ -218,13 +235,21 @@ async function fetchOSRMRoute(from, to, profile) {
   return data.routes[0];
 }
 
+/**
+ * ✅ IMPORTANTE:
+ * - Por defecto dibuja en routeOverlay (normal)
+ * - Si pasas layerTarget: "transport" => dibuja en transportOverlay
+ * - Si pasas layerGroup (L.layerGroup) => dibuja ahí (prioridad)
+ */
 export async function drawRouteBetweenPoints({
   from,
   to,
   mode = "driving",
   color = "#0d6efd",
   dashed = false,
-  weight = 5
+  weight = 5,
+  layerTarget = "normal", // "normal" | "transport"
+  layerGroup = null       // si quieres un layerGroup específico
 }) {
   if (!from || !to) return null;
 
@@ -236,9 +261,19 @@ export async function drawRouteBetweenPoints({
     color,
     weight,
     dashArray: dashed ? "8 10" : null
-  }).addTo(routeOverlay);
+  });
 
-  routeLines.push(line);
+  const target =
+    layerGroup
+      ? layerGroup
+      : (layerTarget === "transport" ? transportOverlay : routeOverlay);
+
+  line.addTo(target);
+
+  // track solo si cae en overlays "globales"
+  if (!layerGroup && layerTarget === "transport") transportLines.push(line);
+  if (!layerGroup && layerTarget !== "transport") routeLines.push(line);
+
   return { route: r, line };
 }
 
@@ -250,11 +285,14 @@ export async function drawTwoLegOSRM({
   color1 = "#6c757d",
   color2 = "#0d6efd",
   infoBox = null,
-  title = "Ruta vía Terminal"
+  title = "Ruta vía Terminal",
+  layerTarget = "normal",
+  layerGroup = null
 }) {
   if (!userLoc || !terminalLoc || !targetLoc) return null;
 
-  clearRoute();
+  if (layerTarget === "transport") clearTransportRoute();
+  else clearRoute();
 
   const r1 = await fetchOSRMRoute(userLoc, terminalLoc, modeToProfile(mode));
   const r2 = await fetchOSRMRoute(terminalLoc, targetLoc, modeToProfile(mode));
@@ -263,10 +301,19 @@ export async function drawTwoLegOSRM({
   const coords1 = r1.geometry.coordinates.map(c => [c[1], c[0]]);
   const coords2 = r2.geometry.coordinates.map(c => [c[1], c[0]]);
 
-  const line1 = L.polyline(coords1, { color: color1, weight: 5, dashArray: "8 10" }).addTo(routeOverlay);
-  const line2 = L.polyline(coords2, { color: color2, weight: 5 }).addTo(routeOverlay);
+  const line1 = L.polyline(coords1, { color: color1, weight: 5, dashArray: "8 10" });
+  const line2 = L.polyline(coords2, { color: color2, weight: 5 });
 
-  routeLines = [line1, line2];
+  const target =
+    layerGroup
+      ? layerGroup
+      : (layerTarget === "transport" ? transportOverlay : routeOverlay);
+
+  line1.addTo(target);
+  line2.addTo(target);
+
+  if (!layerGroup && layerTarget === "transport") transportLines = [line1, line2];
+  if (!layerGroup && layerTarget !== "transport") routeLines = [line1, line2];
 
   const totalDist = (Number(r1.distance) || 0) + (Number(r2.distance) || 0);
   const totalDur = (Number(r1.duration) || 0) + (Number(r2.duration) || 0);

@@ -42,6 +42,34 @@ import {
 import { planLineBoardAlightByOrder } from "../core/transport_bus_planner.js";
 
 /* =====================================================
+   ✅ NUEVO: validación geo (provincia/cantón/parroquia)
+===================================================== */
+function normLite(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+function geoMatches(ctx = {}, place = {}) {
+  const pCtx = normLite(ctx.provincia);
+  const cCtx = normLite(ctx.canton);
+  const paCtx = normLite(ctx.parroquia);
+
+  if (!pCtx && !cCtx && !paCtx) return true;
+
+  const pPl = normLite(place.provincia);
+  const cPl = normLite(place.canton || place.ciudad);
+  const paPl = normLite(place.parroquia);
+
+  // si falta info en el destino, no bloqueamos
+  if ((pCtx && !pPl) || (cCtx && !cPl) || (paCtx && !paPl)) return true;
+
+  if (pCtx && pPl && pCtx !== pPl) return false;
+  if (cCtx && cPl && cCtx !== cPl) return false;
+  if (paCtx && paPl && paCtx !== paPl) return false;
+
+  return true;
+}
+
+/* =====================================================
    MODAL (Bootstrap) - solo para "Líneas de transporte"
 ===================================================== */
 function ensureTransportModal() {
@@ -412,8 +440,6 @@ function resaltarYConectarParadaMasCercana(paradas, linea) {
 
 /* =====================================================
    🚌 MODO BUS: planner URBANO
-   ✅ ctx.dryRun => calcular SIN dibujar
-   ✅ FIX NUEVO: dibujar línea del tramo bus (unir pathStops)
 ===================================================== */
 async function drawWalkOSRM(layerGroup, fromLatLng, toLatLng) {
   const profile = "foot";
@@ -447,7 +473,19 @@ function pathStopsToLatLngs(pathStops) {
 export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {}) {
   if (!userLoc || !destPlace?.ubicacion) return null;
 
-  // ✅ NO limpiar si preserveLayers está activo (modo evaluación)
+  // ✅ GEO check (igual que selects)
+  if (!geoMatches(ctx, destPlace)) {
+    if (ui?.infoEl && !ctx?.dryRun) {
+      ui.infoEl.innerHTML = `
+        <div class="alert alert-info py-2 mb-0">
+          ℹ️ Este destino no coincide con el filtro actual (provincia/cantón/parroquia),
+          por eso el modo <b>bus</b> no se habilita aquí.
+        </div>
+      `;
+    }
+    return null;
+  }
+
   if (!ctx?.preserveLayers) {
     clearTransportLayers();
   }
@@ -457,7 +495,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   let lineas = await getLineasByTipo("urbano", ctx);
 
   // ✅ Proaño / Río Blanco => SOLO Línea 5
-  const normLite = (s) => String(s || "").trim().toLowerCase();
   const isProanoOrRioBlanco = () => {
     const pCtx = normLite(ctx?.parroquia);
     const pDest = normLite(destPlace?.parroquia);
@@ -573,7 +610,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     return null;
   }
 
-  // ✅ DRY RUN: devolver SIN dibujar
   if (ctx?.dryRun) {
     return {
       tipo: "urbano",
@@ -605,11 +641,9 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   const boardLL = [best.boardStop.ubicacion.latitude, best.boardStop.ubicacion.longitude];
   const alightLL = [best.alightStop.ubicacion.latitude, best.alightStop.ubicacion.longitude];
 
-  // ====== FIX NUEVO: DIBUJAR LA LÍNEA DEL TRAMO BUS (pathStops) ======
-  // Une paradas en orden desde subida -> bajada (siguiendo calles OSRM)
+  // dibujar tramo bus siguiendo calles (subida -> bajada)
   try {
     const tramoLatLngs = pathStopsToLatLngs(best.pathStops);
-
     if (tramoLatLngs.length >= 2) {
       const color = bestLinea.color || "#0d6efd";
       const lineLayer = await drawLineRouteFollowingStreets(tramoLatLngs, color);
@@ -618,9 +652,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   } catch (e) {
     console.warn("No se pudo dibujar la línea del tramo bus (urbano):", e);
   }
-  // ================================================================
 
-  // Paradas intermedias del tramo
   if (Array.isArray(best.pathStops) && best.pathStops.length) {
     best.pathStops.forEach(p => {
       const { latitude, longitude } = p.ubicacion || {};

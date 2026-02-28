@@ -1,5 +1,5 @@
 // js/transport/transport_controller.js
-import { clearRoute, map as leafletMap } from "../map/map.js"; // ✅ FIX: importar map
+import { clearTransportRoute, map as leafletMap } from "../map/map.js"; // ✅ cambia: ya NO importamos clearRoute
 import { clearTransportState } from "./core/transport_state.js";
 import { getCollectionCache } from "../app/cache_db.js";
 
@@ -12,7 +12,8 @@ import { planAndShowBusStopsForPlace as planUrbanoForPlace } from "./urbano/urba
 import { planAndShowBusStopsForPlace as planRuralForPlace } from "./rural/rural_controller.js";
 
 export function clearTransportLayers() {
-  try { clearRoute?.(); } catch {}
+  // ✅ SOLO transporte, NO borra la ruta normal
+  try { clearTransportRoute?.(); } catch {}
   try { clearTransportState?.(); } catch {}
 }
 
@@ -53,11 +54,6 @@ function distMeters(map, a, b) {
   try { return map.distance(a, b); } catch { return Infinity; }
 }
 
-/**
- * Retorna true si hay al menos UNA parada relevante cerca de user o destino.
- * - urbano: paradas_transporte tipo urbana
- * - rural : paradas_rurales tipo rural
- */
 export async function hasBusCoverage({ map, userLoc, destLoc, radiusUrb = 2200, radiusRur = 4200 } = {}) {
   if (!map || !userLoc || !destLoc) return false;
 
@@ -91,10 +87,8 @@ export async function planAndShowBusStops(userLoc, destPlace, ctx = {}, ui = {})
 
   const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
 
-  // ✅ PRECHECK cobertura mínima
+  // PRECHECK cobertura mínima
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
-
-  // ✅ FIX: pasar el map real (Leaflet) en vez de undefined
   const ok = await hasBusCoverage({ map: leafletMap, userLoc, destLoc });
 
   if (!ok) {

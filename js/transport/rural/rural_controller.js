@@ -1,5 +1,5 @@
 // js/transport/rural/rural_controller.js
-import { map, drawRouteBetweenPoints, clearRoute } from "../../map/map.js";
+import { map } from "../../map/map.js";
 import { getCollectionCache } from "../../app/cache_db.js";
 
 import { renderLineaExtraControls } from "../core/transport_ui.js";
@@ -36,6 +36,38 @@ import {
 } from "../core/transport_state.js";
 
 /* =====================================================
+   ✅ NUEVO: validación geo (provincia/cantón/parroquia)
+===================================================== */
+function normLite(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+/**
+ * Si ctx trae provincia/cantón/parroquia, validamos contra destPlace.
+ * Si destPlace no tiene esos campos -> no bloqueamos (lo dejamos pasar).
+ */
+function geoMatches(ctx = {}, place = {}) {
+  const pCtx = normLite(ctx.provincia);
+  const cCtx = normLite(ctx.canton);
+  const paCtx = normLite(ctx.parroquia);
+
+  if (!pCtx && !cCtx && !paCtx) return true;
+
+  const pPl = normLite(place.provincia);
+  const cPl = normLite(place.canton || place.ciudad);
+  const paPl = normLite(place.parroquia);
+
+  // si falta info en el destino, no bloqueamos
+  if ((pCtx && !pPl) || (cCtx && !cPl) || (paCtx && !paPl)) return true;
+
+  if (pCtx && pPl && pCtx !== pPl) return false;
+  if (cCtx && cPl && cCtx !== cPl) return false;
+  if (paCtx && paPl && paCtx !== paPl) return false;
+
+  return true;
+}
+
+/* =====================================================
    LIMITES (RURAL)
 ===================================================== */
 const RURAL_BOARD_STEPS = [150, 300, 500, 800, 1000, 1200, 1500, 2000, 2600, 3200];
@@ -43,9 +75,6 @@ const RURAL_DEST_STEPS  = [250, 450, 650, 900, 1200, 1500, 2000, 2600, 3200];
 
 const LEVELS_RURAL = Math.max(RURAL_BOARD_STEPS.length, RURAL_DEST_STEPS.length);
 const EXAGGERATED_WALK_WARN_M = 2300;
-
-const MAX_WALK_TO_STOP_M = 1000;   // preferencia, pero habrá fallback
-const MAX_WALK_TO_DEST_M = 1500;
 
 // ✅ regla nueva: si la bajada queda a <=700m del destino, caminar
 const WALK_AFTER_ALIGHT_M = 700;
@@ -179,13 +208,12 @@ function showDeparturesModal(html, now = new Date()) {
 }
 
 /* =====================================================
-   LIMPIEZA (más fuerte)
+   ✅ LIMPIEZA (sin borrar routeOverlay global)
 ===================================================== */
 export function clearTransportLayers() {
   try { stopPopupLiveUpdate(); } catch {}
   try { clearTransportState(); } catch {}
-  // ✅ importante: algunas rutas (auto) se dibujan en capas globales
-  try { clearRoute?.(); } catch {}
+  // ⚠️ ya NO llamamos clearRoute() global (para no pisar rutas no-transporte)
 }
 
 /* =====================================================
@@ -251,7 +279,7 @@ function findNearestCoordIndex(coords, targetLL) {
 }
 
 /* =====================================================
-   PREFIJOS + NUMERAL (como antes)
+   NUMERAL + PREFIJO
 ===================================================== */
 function parseCodigoParts(codigo) {
   const c = String(codigo || "").trim().toLowerCase();
@@ -285,46 +313,153 @@ function sortByNumeralStable(arr) {
   });
 }
 
+/* =====================================================
+   ✅ ESQUEMAS DE ORDEN (SELECCIÓN POR LÍNEA)
+   - Esquema A (actual): SOLO líneas con denominacion === "Entra Sevilla"
+   - Esquema B (escalable): por lineasruralpasan + numeral (pfi inicio ida, pfv final vuelta)
+===================================================== */
+function usesSevillaSchema(linea) {
+  return normLite(linea?.denominacion) === "entra sevilla";
+}
+
 /**
- * ✅ orden por prefijos (guía principal) + numeral
+ * Esquema A (actual): orden por prefijos + numeral
  * IDA: pfi -> pfis -> prism -> resto
  * VUELTA: prvsm -> pfvsm -> pfvs -> pfv -> resto
  */
-function buildOrderedStopsForLinea(paradasAll, sentido) {
-  const s = normStr(sentido);
+// ✅ Esquema 1 (Entra Sevilla)
+// Reglas:
+// - IDA:  pfi  -> pfis -> (recorrido de la línea por lineasruralpasan)
+// - VUELTA: (recorrido de la línea por lineasruralpasan) -> pfvs -> pfv
+// Orden siempre por numeral (fallback: orden, fallback: número en código)
 
-  // Filtra por sentido (clave para no mezclar ida/vuelta)
-  const base = (Array.isArray(paradasAll) ? paradasAll : []).filter(p => normStr(p?.sentido) === s);
+function buildOrderedStops_Sevilla(paradasAll, sentido, codigoLinea) {
+  const s = normStr(sentido);              // "ida" | "vuelta"
+  const lineNeed = normCodeLoose(codigoLinea);
 
-  const byPrefix = new Map();
-  for (const p of base) {
-    const pref = getPrefix(p);
-    if (!byPrefix.has(pref)) byPrefix.set(pref, []);
-    byPrefix.get(pref).push(p);
+  // 1) Filtra por sentido (clave: no mezclar ida/vuelta)
+  const base = (Array.isArray(paradasAll) ? paradasAll : [])
+    .filter(p => normStr(p?.sentido) === s);
+
+  // Helpers: prefijo / numeral / pertenencia a línea
+  function normCodeLoose(x) {
+    const t = String(x ?? "").trim().toLowerCase();
+    return t.replace(/\s+/g, "").replace(/[-_]/g, "");
   }
 
-  const orderIda = ["pfi", "pfis", "prism"];
-  const orderVuelta = ["prvsm", "pfvsm", "pfvs", "pfv"];
-  const wanted = (s === "vuelta") ? orderVuelta : orderIda;
-
-  const out = [];
-
-  for (const pref of wanted) {
-    const group = byPrefix.get(pref);
-    if (!group?.length) continue;
-    out.push(...sortByNumeralStable(group));
-    byPrefix.delete(pref);
+  function extractLineCodes(p) {
+    const arr = Array.isArray(p?.lineasruralpasan) ? p.lineasruralpasan : [];
+    const out = [];
+    for (const it of arr) {
+      if (typeof it === "string" || typeof it === "number") {
+        out.push(normCodeLoose(it));
+        continue;
+      }
+      if (it && typeof it === "object") {
+        if (it.codigo != null) out.push(normCodeLoose(it.codigo));
+        else if (it.code != null) out.push(normCodeLoose(it.code));
+        else if (it.id != null) out.push(normCodeLoose(it.id));
+      }
+    }
+    return out.filter(Boolean);
   }
 
-  // resto de prefijos (para no “perder” paradas nuevas)
-  const restPrefixes = [...byPrefix.keys()].sort((a, b) => a.localeCompare(b));
-  for (const pref of restPrefixes) {
-    const group = byPrefix.get(pref);
-    if (!group?.length) continue;
-    out.push(...sortByNumeralStable(group));
+  function belongsToLinea(p) {
+    if (!lineNeed) return false;
+    const codes = extractLineCodes(p);
+    return codes.includes(lineNeed);
   }
 
-  // dedup por codigo
+  function parseCodigoParts(codigo) {
+    const c = String(codigo || "").trim().toLowerCase();
+    const m = c.match(/^([a-z_]+?)(\d+)$/);
+    if (!m) return { prefix: c, num: null };
+    return { prefix: m[1], num: Number(m[2]) };
+  }
+
+  function getNumeral(p) {
+    const n = Number(p?.numeral);
+    if (Number.isFinite(n)) return n;
+
+    const o = Number(p?.orden);
+    if (Number.isFinite(o)) return o;
+
+    const { num } = parseCodigoParts(p?.codigo);
+    return Number.isFinite(num) ? num : Infinity;
+  }
+
+  function sortByNumeralStable(arr) {
+    return [...arr].sort((a, b) => {
+      const na = getNumeral(a);
+      const nb = getNumeral(b);
+      if (na !== nb) return na - nb;
+      return String(a?.codigo || "").localeCompare(String(b?.codigo || ""));
+    });
+  }
+
+  function getPrefix(p) {
+    const { prefix } = parseCodigoParts(p?.codigo);
+    return String(prefix || "").toLowerCase().trim();
+  }
+
+  // Reglas de selección por grupos
+  const isUsoRecorrido = (p) => normStr(p?.uso) === "recorrido";
+  const isPfi = (p) => getPrefix(p).startsWith("pfi");   // pfi0, pfi1...
+  const isPfis = (p) => getPrefix(p).startsWith("pfis"); // pfis0...
+  const isPfvs = (p) => getPrefix(p).startsWith("pfvs"); // pfvs1...
+  const isPfv = (p) => getPrefix(p).startsWith("pfv");   // pfv0...
+
+  // Grupo: paradas "recorrido" que pertenecen a la línea (por array)
+  const recorridoLinea = base.filter(p => isUsoRecorrido(p) && belongsToLinea(p));
+
+  // ✅ Importante: asegurar consecutividad por numeral
+  // Tomamos el "tramo" desde el numeral más bajo hasta el más alto donde siga existiendo la línea.
+  // Si hay huecos, igual avanzamos; si el conjunto es disjunto, tomamos todo el conjunto ordenado.
+  function buildRecorridoConsecutivo(recArr) {
+    const ord = sortByNumeralStable(recArr);
+    // si no quieres recortar nada, devuelve ord directo:
+    // return ord;
+
+    // Versión "tramo principal": del minNumeral al maxNumeral presentes
+    const nums = ord.map(getNumeral).filter(n => Number.isFinite(n));
+    if (!nums.length) return ord;
+
+    const minN = Math.min(...nums);
+    const maxN = Math.max(...nums);
+
+    // Incluimos solo los que estén dentro del rango [minN..maxN]
+    // (normalmente será todo; ayuda si hay valores raros)
+    const out = ord.filter(p => {
+      const n = getNumeral(p);
+      return Number.isFinite(n) && n >= minN && n <= maxN;
+    });
+
+    return out.length ? out : ord;
+  }
+
+  const tramoRecorrido = buildRecorridoConsecutivo(recorridoLinea);
+
+  // Armar salida según sentido
+  let out = [];
+
+  if (s === "ida") {
+    const pfi = sortByNumeralStable(base.filter(isPfi));
+    const pfis = sortByNumeralStable(base.filter(isPfis));
+
+    // IDA: pfi -> pfis -> recorridoLinea
+    out = [...pfi, ...pfis, ...tramoRecorrido];
+  } else if (s === "vuelta") {
+    const pfvs = sortByNumeralStable(base.filter(isPfvs));
+    const pfv = sortByNumeralStable(base.filter(isPfv));
+
+    // VUELTA: recorridoLinea -> pfvs -> pfv
+    out = [...tramoRecorrido, ...pfvs, ...pfv];
+  } else {
+    // fallback: por si llega algo raro
+    out = sortByNumeralStable(base);
+  }
+
+  // dedup por codigo (por si algún grupo se solapa)
   const seen = new Set();
   const final = [];
   for (const p of out) {
@@ -335,6 +470,65 @@ function buildOrderedStopsForLinea(paradasAll, sentido) {
     final.push(p);
   }
   return final;
+}
+
+/**
+ * Esquema B (escalable):
+ * - Filtra SOLO paradas cuyo lineasruralpasan incluye el código de la línea
+ * - Ordena por numeral (y desempate por codigo)
+ * - Mantiene pfi como “inicio” natural en ida, y pfv como “final” natural en vuelta (si existen)
+ *   (no fuerza prefijos; el orden lo manda el numeral)
+ */
+function buildOrderedStops_ByLineaPasan(paradasAll, sentido, codigoLinea) {
+  const s = normStr(sentido);
+  const code = normCode(codigoLinea);
+
+  const base = (Array.isArray(paradasAll) ? paradasAll : [])
+    .filter(p => normStr(p?.sentido) === s)
+    .filter(p => {
+      const codes = extractCodesFromLineasruralpasan(p);
+      return codes.includes(code);
+    });
+
+  // si por alguna razón no hay nada, devolvemos vacío (caller hace fallback)
+  if (!base.length) return [];
+
+  // Orden principal por numeral
+  const sorted = sortByNumeralStable(base);
+
+  // Dedup por codigo
+  const seen = new Set();
+  const final = [];
+  for (const p of sorted) {
+    const key = String(p?.codigo || "").trim();
+    if (!key) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    final.push(p);
+  }
+  return final;
+}
+
+/**
+ * Wrapper: decide qué esquema usar según la línea
+ */
+function buildOrderedStopsForLinea(paradasAll, sentido, linea) {
+  const s = normStr(sentido);
+
+  // ✅ Esquema A (solo "Entra Sevilla")
+  if (usesSevillaSchema(linea)) {
+    return buildOrderedStops_Sevilla(paradasAll, s, linea?.codigo);
+  }
+
+  // ✅ Esquema B (escalable: por lineasruralpasan + numeral)
+  const out = buildOrderedStops_ByLineaPasan(paradasAll, s, linea?.codigo);
+
+  // fallback: si por alguna razón no encontró nada con lineasruralpasan
+  if (!out.length) {
+    return buildOrderedStops_Sevilla(paradasAll, s, linea?.codigo);
+  }
+
+  return out;
 }
 
 /**
@@ -391,15 +585,12 @@ function nextDepartureDeltaMin(linea, sentidoLower, now = new Date()) {
   const fin = parseHHMM(linea?.horario_fin);
   if (ini == null || fin == null) return 9999;
 
-  // si estamos antes del inicio, “próximo” es inicio
   if (cur <= ini) return ini - cur;
 
-  // si estamos dentro, asumimos que puede salir “ya” (delta 0)
   if (ini <= fin) {
     if (cur <= fin) return 0;
     return (24 * 60 - cur) + ini;
   } else {
-    // cruza medianoche
     if (cur >= ini || cur <= fin) return 0;
     return ini - cur;
   }
@@ -413,11 +604,6 @@ function getFreqMin(linea) {
   return null;
 }
 
-/**
- * Salidas “ida” en la próxima hora:
- * - Si horario_ida existe: filtra lista
- * - Si no: genera por horario_inicio/fin + frecuencia
- */
 function departuresNextHour_Ida(linea, now = new Date(), windowMin = 60) {
   const start = nowMinutes(now);
   const end = start + windowMin;
@@ -425,26 +611,21 @@ function departuresNextHour_Ida(linea, now = new Date(), windowMin = 60) {
   const ida = Array.isArray(linea?.horario_ida) ? linea.horario_ida : [];
   const list = ida.map(parseHHMM).filter(v => v != null).sort((a, b) => a - b);
   if (list.length) {
-    // incluye solo dentro de ventana [start, end]
     return list.filter(t => t >= start && t <= end).map(fmtHHMM);
   }
 
-  // fallback: inicio/fin + freq
   const ini = parseHHMM(linea?.horario_inicio);
   const fin = parseHHMM(linea?.horario_fin);
   const freq = getFreqMin(linea);
 
   if (ini == null || fin == null) return [];
-  if (!freq) return []; // sin frecuencia no generamos “salidas”
+  if (!freq) return [];
 
   const out = [];
   const inWindow = (t) => t >= start && t <= end;
 
-  // caso simple (no cruza medianoche)
   if (ini <= fin) {
-    // generar desde max(start, ini) redondeado hacia arriba al “paso”
     let t = Math.max(start, ini);
-    // ajusta al múltiplo de freq desde ini
     const k = Math.ceil((t - ini) / freq);
     t = ini + k * freq;
     while (t <= Math.min(end, fin)) {
@@ -454,13 +635,8 @@ function departuresNextHour_Ida(linea, now = new Date(), windowMin = 60) {
     return out;
   }
 
-  // cruza medianoche (ini..1440) U (0..fin)
-  // generamos solo la porción que cae en [start, end] (mismo día)
-  // si estamos antes de fin, está “activo” en madrugada
-  // si estamos después de ini, está “activo” de noche
   const maxT = Math.min(end, 24 * 60 - 1);
 
-  // tramo noche
   if (start >= ini) {
     let t = start;
     const k = Math.ceil((t - ini) / freq);
@@ -470,10 +646,8 @@ function departuresNextHour_Ida(linea, now = new Date(), windowMin = 60) {
       t += freq;
     }
   } else {
-    // tramo madrugada (0..fin)
     const maxM = Math.min(end, fin);
     let t = start;
-    // aquí tomamos “0” como base para paso, aproximación
     const k = Math.ceil((t - 0) / freq);
     t = 0 + k * freq;
     while (t <= maxM) {
@@ -485,11 +659,6 @@ function departuresNextHour_Ida(linea, now = new Date(), windowMin = 60) {
   return out;
 }
 
-/**
- * Próximo retorno (vuelta) aproximado:
- * - Si horario_retorno existe: toma el siguiente >= ahora
- * - Si no: usa nextDepartureDeltaMin con sentido=vuelta y lo convierte a hora
- */
 function nextReturnTime(linea, now = new Date()) {
   const cur = nowMinutes(now);
   const ret = Array.isArray(linea?.horario_retorno) ? linea.horario_retorno : [];
@@ -497,7 +666,7 @@ function nextReturnTime(linea, now = new Date()) {
   if (list.length) {
     const t = list.find(x => x >= cur);
     if (t != null) return fmtHHMM(t);
-    return fmtHHMM(list[0]); // siguiente día
+    return fmtHHMM(list[0]);
   }
 
   const d = nextDepartureDeltaMin(linea, "vuelta", now);
@@ -576,6 +745,35 @@ async function osrmRouteDistanceMeters(fromLL, toLL, profile = "driving") {
 }
 
 /* =====================================================
+   ✅ NUEVO: dibujar tramo "auto" dentro del layer del transporte
+   (NO routeOverlay global)
+===================================================== */
+async function drawDriveOSRMIntoLayer(layerGroup, fromLL, toLL, color = "#0d6efd") {
+  try {
+    if (!layerGroup || !fromLL || !toLL) return null;
+
+    const [lat1, lon1] = fromLL;
+    const [lat2, lon2] = toLL;
+
+    const url =
+      `https://router.project-osrm.org/route/v1/driving/` +
+      `${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.routes?.length) return null;
+
+    const r = data.routes[0];
+    const coords = r.geometry.coordinates.map(c => [c[1], c[0]]);
+    const line = L.polyline(coords, { color, weight: 5 }).addTo(layerGroup);
+
+    return { route: r, line };
+  } catch {
+    return null;
+  }
+}
+
+/* =====================================================
    BOTÓN: próximas salidas (debajo del select sentido)
 ===================================================== */
 function upsertDeparturesButton(container, lineas, ctx = {}) {
@@ -596,14 +794,13 @@ function upsertDeparturesButton(container, lineas, ctx = {}) {
     const now = new Date();
     const rows = [];
 
-    // orden por “orden” si existe
     const sorted = [...(Array.isArray(lineas) ? lineas : [])].sort((a, b) => (Number(a?.orden) || 0) - (Number(b?.orden) || 0));
 
     for (const l of sorted) {
       if (!l?.activo) continue;
       if (normStr(l?.tipo) !== "rural") continue;
 
-      const salidas = departuresNextHour_Ida(l, now, 60); // SOLO salidas (ida)
+      const salidas = departuresNextHour_Ida(l, now, 60);
       if (!salidas.length) continue;
 
       const retTxt = nextReturnTime(l, now);
@@ -703,7 +900,6 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
         coberturas: [],
       });
 
-      // ✅ botón debajo del select sentido (queda dentro de #linea-extra)
       upsertDeparturesButton(container, lineas, ctx);
       return;
     }
@@ -722,7 +918,6 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
         coberturas: [],
       });
 
-      // ✅ vuelve a insertar botón debajo del select sentido
       upsertDeparturesButton(container, lineas, ctx);
 
       if (!sentidoSel) return;
@@ -734,7 +929,9 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
 }
 
 /* =====================================================
-   MOSTRAR RUTA (RURAL) - manual (sin tocar)
+   MOSTRAR RUTA (RURAL)
+   ✅ Usa esquema A para "Entra Sevilla"
+   ✅ Usa esquema B (lineasruralpasan+numeral) para el resto
 ===================================================== */
 export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   clearTransportLayers();
@@ -743,16 +940,15 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   const sentidoSel = titleCase(normStr(opts.sentido));
   const sentidoLower = normStr(sentidoSel);
 
-  const paradasRaw = await getParadasByLinea(linea.codigo, {
-    ...ctx,
-    tipo: "rural",
-    sentido: sentidoSel
-  });
+  // ✅ clave: dataset de paradas según esquema
+  const paradasRaw = usesSevillaSchema(linea)
+    ? await getParadasByLinea(linea.codigo, { ...ctx, tipo: "rural", sentido: sentidoSel })
+    : await getParadasRuralesByLineaPasan(linea.codigo);
 
   if (!paradasRaw?.length) return;
 
-  const ordered = buildOrderedStopsForLinea(paradasRaw, sentidoLower);
-  const paradas = cutStopsAtFinDeRuta(ordered, sentidoLower);
+const ordered = buildOrderedStopsForLinea(paradasRaw, sentidoLower, linea);
+const paradas = cutStopsAtFinDeRuta(ordered, sentidoLower);
 
   setCurrentParadas(paradas);
   setCurrentStopOffsets(computeStopOffsets(paradas, linea));
@@ -823,12 +1019,29 @@ function buildIndexByLatLng(coords) {
 export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {}) {
   if (!userLoc || !destPlace?.ubicacion) return null;
 
+  // ✅ GEO check (igual que selects)
+  if (!geoMatches(ctx, destPlace)) {
+    if (ui?.infoEl && !ctx?.dryRun) {
+      ui.infoEl.innerHTML = `
+        <div class="alert alert-info py-2 mb-0">
+          ℹ️ Este destino no coincide con el filtro actual (provincia/cantón/parroquia),
+          por eso el modo <b>bus</b> no se habilita aquí.
+        </div>
+      `;
+    }
+    return null;
+  }
+
   if (!ctx?.preserveLayers) clearTransportLayers();
 
   const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
 
-  const lineas = await getLineasByTipo("rural", { ...ctx, ignoreGeoFilter: true });
+  // ✅ FIX: respetar geoFilter salvo casos especiales
+  const lineas = await getLineasByTipo("rural", {
+    ...ctx,
+    ignoreGeoFilter: ctx?.ignoreGeoFilter === true || ctx?.specialSevilla === true
+  });
 
   if (!lineas?.length) {
     if (ui?.infoEl && !ctx?.dryRun) ui.infoEl.innerHTML = "❌ No hay líneas rurales disponibles.";
@@ -851,11 +1064,8 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   }
 
   let best = null;
-
-  // peso de tiempo (min) en score
   const W_TIME = 12;
 
-  // sentidos a probar (si no viene, probamos ambos)
   const reqSentido = normStr(ctx?.sentido || "auto");
   const sentidosToTry = (reqSentido === "ida" || reqSentido === "vuelta") ? [reqSentido] : ["ida", "vuelta"];
 
@@ -878,20 +1088,17 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       for (const sentidoTry of sentidosToTry) {
         const sentidoLower = normStr(sentidoTry);
 
-        // ✅ vuelve a usar prefijos como guía principal
-        const ordered = buildOrderedStopsForLinea(baseStops, sentidoLower);
+        // ✅ esquema A/B según linea.denominacion
+        const ordered = buildOrderedStopsForLinea(baseStops, sentidoLower, linea);
         const paradas = cutStopsAtFinDeRuta(ordered, sentidoLower);
 
-        // coords = TODAS las paradas (para conectar consecutivas)
         const coords = paradas.map(getParadaLatLng).filter(Boolean);
         if (coords.length < 2) continue;
 
         const visibles = paradas.filter(isMarcadorVisible);
         if (visibles.length < 2) continue;
 
-        // ======================
         // SUBIDA
-        // ======================
         const nearestStopUser = findNearestStop(userLoc, visibles);
         const nearestCoordUser = findNearestCoordOnPath(userLoc, coords);
 
@@ -914,10 +1121,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
         const idxBoard = findNearestCoordIndex(coords, boardLL);
         if (idxBoard < 0) continue;
 
-        // ======================
-        // BAJADA (FIX CRÍTICO)
-        // ✅ buscar SOLO después de idxBoard para que NO se elija una bajada “antes”
-        // ======================
+        // BAJADA: SOLO después de idxBoard
         const candidates = [];
         for (let i = idxBoard + 1; i < paradas.length; i++) {
           const ll = getParadaLatLng(paradas[i]);
@@ -934,7 +1138,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
           const nearestCoordDest = findNearestCoordOnPath(destLoc, coords.slice(idxBoard + 1));
           if (!nearestCoordDest || nearestCoordDest.d > maxDest) continue;
 
-          // ojo: nearestCoordDest viene del slice, hay que ubicarlo en coords completo
           const alightLL = nearestCoordDest.ll;
           const idxAlight = findNearestCoordIndex(coords, alightLL);
           if (idxAlight < 0) continue;
@@ -982,17 +1185,14 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
           continue;
         }
 
-        // top K candidatas
         candidates.sort((a, b) => a.dLine - b.dLine);
         const top = candidates.slice(0, Math.max(1, K_ALIGHT_CANDIDATES));
 
-        // si hay alguna <=700m => caminar (elige la más cercana)
         let chosen = null;
         const walkables = top.filter(x => x.dLine <= WALK_AFTER_ALIGHT_M);
         if (walkables.length) {
           chosen = walkables[0];
         } else {
-          // ✅ escoger la que deje el AUTO más corto
           let bestDrive = Infinity;
           for (const c of top) {
             const drive = await osrmRouteDistanceMeters(c.ll, destLoc, "driving");
@@ -1002,14 +1202,13 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
               chosen = { ...c, driveMeters: val };
             }
           }
-          if (!chosen) chosen = top[0]; // fallback
+          if (!chosen) chosen = top[0];
         }
 
         const alightLL = chosen.ll;
         const idxAlight = chosen.idx;
         if (!(idxBoard < idxAlight)) continue;
 
-        // ✅ tramo bus: SOLO hasta la bajada (aquí evitamos el bug de seguir dibujando)
         const tramoCoords = coords.slice(idxBoard, idxAlight + 1);
         if (tramoCoords.length < 2) continue;
 
@@ -1081,7 +1280,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     return null;
   }
 
-  // DRY RUN
   if (ctx?.dryRun) {
     const metrics = {
       walk1: best.boardDist || 0,
@@ -1115,7 +1313,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     const idx = idxMap.get(llKey(ll));
     if (idx == null) continue;
 
-    // solo las del tramo
     if (idx < best.fromIdx || idx > best.toIdx) continue;
 
     const marker = L.circleMarker(ll, {
@@ -1148,13 +1345,13 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   // caminata a subir
   await drawDashedAccessRoute(userLoc, best.boardLL, "#666");
 
-  // ✅ ruta bus SOLO hasta la bajada (fix principal)
+  // ruta bus SOLO hasta la bajada
   const ruralLine = await drawLineRouteFollowingStreets(best.tramoCoords, best.linea.color || "#000");
   if (ruralLine) routesGroup.addLayer(ruralLine);
 
-  // final: caminar si <=700, caso contrario auto
+  // final: caminar si <=700, caso contrario auto (DENTRO DEL routesGroup)
   if (best.useAuto) {
-    await drawRouteBetweenPoints({ from: best.alightLL, to: destLoc, mode: "driving", dashed: false });
+    await drawDriveOSRMIntoLayer(routesGroup, best.alightLL, destLoc, "#0d6efd");
   } else {
     await drawDashedAccessRoute(best.alightLL, destLoc, "#666");
   }
