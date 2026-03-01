@@ -1,5 +1,4 @@
 // js/transport/core/transport_ui.js
-
 export function renderLineaExtraControls(
   container,
   { sentidos = [], showCobertura = false, coberturas = [] }

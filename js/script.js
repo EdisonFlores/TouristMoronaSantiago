@@ -68,6 +68,8 @@ function resetMap() {
   clearRouteInfo();
   activePlace = null;
   setActivePlaceAction(null);
+
+  // ✅ si venías usando indicaciones manuales, limpiamos
   manual.clearManualDest();
   manual.clearManualStart();
 }
@@ -190,7 +192,7 @@ function showDetectedFacade() {
 
     btn.onclick = async () => {
       applyVisitMorona({
-        setUserLocation: updateUserLocation, // ✅ ahora via actions
+        setUserLocation: updateUserLocation, // ✅ via actions
         map,
         onAfterSet: async (loc) => {
           setUserMarker(loc, true);
@@ -199,7 +201,7 @@ function showDetectedFacade() {
           detectedAdmin = res.detectedAdmin;
           ctxGeo = res.ctxGeo;
 
-          // entorno fijo en "Explorar Morona"
+          // entorno fijo al visitar Morona
           ctxGeo.entornoUser = "urbano";
 
           showDetectedFacade();
@@ -279,7 +281,7 @@ const manual = createManualRouting({
   refreshLayersOverlays,
   clearRouteInfo,
 
-  // ✅ NUEVO: detectar contexto (prov/cant/parr + entorno) para puntos manuales
+  // ✅ detectar contexto prov/cant/parr + entorno para puntos manuales
   detectPointContext
 });
 
@@ -308,7 +310,7 @@ function initMapControls() {
     onDirectionsFromHere: (latlng) => manual.setManualStartPoint(latlng),
     onDirectionsToHere: (latlng) => manual.setManualDestination(latlng),
 
-    // ✅ NUEVO: limpiar indicaciones (volver al modo normal)
+    // ✅ limpiar indicaciones (volver al modo normal)
     onClearDirections: () => clearDirections(),
 
     onCenterHere: (latlng) => map.setView(latlng, map.getZoom())
@@ -320,7 +322,7 @@ showLocatingBanner();
 initMapControls();
 
 const USE_TEST_LOCATION = false;
-const TEST_LOCATION = [-2.53624, -78.16309];
+const TEST_LOCATION = [-2.53699, -78.16339];
 
 async function afterLocate(loc) {
   updateUserLocation(loc);

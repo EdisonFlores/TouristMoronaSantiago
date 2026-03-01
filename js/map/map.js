@@ -13,7 +13,6 @@ export const baseLayers = {
   })
 };
 
-// default
 baseLayers["OSM (Standard)"].addTo(map);
 
 // ===== Overlays principales =====
@@ -22,14 +21,14 @@ export const markersLayer = L.layerGroup().addTo(map);
 // ✅ capa de rutas “no-transporte”
 export const routeOverlay = L.layerGroup().addTo(map);
 
-// ✅ NUEVO: capa EXCLUSIVA para transporte (bus / acceso / auto final de rural si lo usas)
+// ✅ capa EXCLUSIVA para transporte
 export const transportOverlay = L.layerGroup().addTo(map);
 
-let routeLine = null;            // ruta simple (NORMAL)
-let routeLines = [];             // rutas extra (NORMAL)
+let routeLine = null;
+let routeLines = [];
 let markerSelected = null;
 
-let transportLines = [];         // rutas OSRM dibujadas por TRANSPORTE (si las usas)
+let transportLines = [];
 
 /* ================= LIMPIEZA ================= */
 export function clearMarkers() {
@@ -37,7 +36,6 @@ export function clearMarkers() {
 }
 
 export function clearRoute() {
-  // ✅ solo limpia lo “normal”
   if (routeLine) {
     try { routeOverlay.removeLayer(routeLine); } catch {}
     routeLine = null;
@@ -54,7 +52,6 @@ export function clearRoute() {
   }
 }
 
-// ✅ NUEVO: limpia SOLO lo de transporte
 export function clearTransportRoute() {
   if (transportLines.length) {
     transportLines.forEach(l => {
@@ -62,7 +59,6 @@ export function clearTransportRoute() {
     });
     transportLines = [];
   }
-  // por seguridad (si algún controlador metió layers directo ahí)
   try { transportOverlay.clearLayers(); } catch {}
 }
 
@@ -236,10 +232,9 @@ async function fetchOSRMRoute(from, to, profile) {
 }
 
 /**
- * ✅ IMPORTANTE:
  * - Por defecto dibuja en routeOverlay (normal)
- * - Si pasas layerTarget: "transport" => dibuja en transportOverlay
- * - Si pasas layerGroup (L.layerGroup) => dibuja ahí (prioridad)
+ * - layerTarget: "transport" => transportOverlay
+ * - layerGroup (L.layerGroup) => prioridad
  */
 export async function drawRouteBetweenPoints({
   from,
@@ -248,8 +243,8 @@ export async function drawRouteBetweenPoints({
   color = "#0d6efd",
   dashed = false,
   weight = 5,
-  layerTarget = "normal", // "normal" | "transport"
-  layerGroup = null       // si quieres un layerGroup específico
+  layerTarget = "normal",
+  layerGroup = null
 }) {
   if (!from || !to) return null;
 
@@ -270,7 +265,6 @@ export async function drawRouteBetweenPoints({
 
   line.addTo(target);
 
-  // track solo si cae en overlays "globales"
   if (!layerGroup && layerTarget === "transport") transportLines.push(line);
   if (!layerGroup && layerTarget !== "transport") routeLines.push(line);
 

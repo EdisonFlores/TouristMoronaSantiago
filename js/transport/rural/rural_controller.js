@@ -42,10 +42,6 @@ function normLite(s) {
   return String(s || "").trim().toLowerCase();
 }
 
-/**
- * Si ctx trae provincia/cantón/parroquia, validamos contra destPlace.
- * Si destPlace no tiene esos campos -> no bloqueamos (lo dejamos pasar).
- */
 function geoMatches(ctx = {}, place = {}) {
   const pCtx = normLite(ctx.provincia);
   const cCtx = normLite(ctx.canton);
@@ -156,7 +152,7 @@ function showLineaModal(linea, now = new Date()) {
 }
 
 /* =====================================================
-   MODAL (Bootstrap) - PRÓXIMAS SALIDAS
+   MODAL (Bootstrap) - PRÓXIMAS SALIDAS / RETORNOS (tabs)
 ===================================================== */
 function ensureDeparturesModal() {
   let el = document.getElementById("tm-dep-modal");
@@ -174,9 +170,30 @@ function ensureDeparturesModal() {
           </div>
 
           <div class="modal-body">
-            <div id="tm-dep-modal-body" class="small"></div>
+            <ul class="nav nav-tabs" id="tm-dep-tabs" role="tablist">
+              <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="tm-tab-salidas" data-bs-toggle="tab" data-bs-target="#tm-pane-salidas" type="button" role="tab">
+                  Salidas (Ida)
+                </button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" id="tm-tab-retornos" data-bs-toggle="tab" data-bs-target="#tm-pane-retornos" type="button" role="tab">
+                  Retornos (Vuelta)
+                </button>
+              </li>
+            </ul>
+
+            <div class="tab-content border border-top-0 rounded-bottom p-2" id="tm-dep-tabcontent">
+              <div class="tab-pane fade show active" id="tm-pane-salidas" role="tabpanel">
+                <div id="tm-dep-modal-body-salidas" class="small"></div>
+              </div>
+              <div class="tab-pane fade" id="tm-pane-retornos" role="tabpanel">
+                <div id="tm-dep-modal-body-retornos" class="small"></div>
+              </div>
+            </div>
+
             <div class="text-muted small mt-2">
-              ℹ️ “Salidas” se filtra solo por la próxima hora. El “retorno” mostrado es el próximo retorno aproximado.
+              ℹ️ Listas filtradas por la próxima hora. Horarios aproximados.
             </div>
           </div>
 
@@ -192,13 +209,16 @@ function ensureDeparturesModal() {
   return document.getElementById("tm-dep-modal");
 }
 
-function showDeparturesModal(html, now = new Date()) {
+function showDeparturesModal(htmlSalidas, htmlRetornos, now = new Date()) {
   const modalEl = ensureDeparturesModal();
   const titleEl = modalEl.querySelector("#tm-dep-modal-title");
-  const bodyEl = modalEl.querySelector("#tm-dep-modal-body");
+  const bodySal = modalEl.querySelector("#tm-dep-modal-body-salidas");
+  const bodyRet = modalEl.querySelector("#tm-dep-modal-body-retornos");
 
-  titleEl.textContent = `Próximas salidas (desde ${hhmmNow(now)} hasta ${hhmmNow(new Date(now.getTime() + 60 * 60000))})`;
-  bodyEl.innerHTML = html;
+  titleEl.textContent = `Próxima hora (${hhmmNow(now)} → ${hhmmNow(new Date(now.getTime() + 60 * 60000))})`;
+
+  bodySal.innerHTML = htmlSalidas;
+  bodyRet.innerHTML = htmlRetornos;
 
   const modal = window.bootstrap?.Modal?.getOrCreateInstance(modalEl, {
     backdrop: true,
@@ -213,7 +233,6 @@ function showDeparturesModal(html, now = new Date()) {
 export function clearTransportLayers() {
   try { stopPopupLiveUpdate(); } catch {}
   try { clearTransportState(); } catch {}
-  // ⚠️ ya NO llamamos clearRoute() global (para no pisar rutas no-transporte)
 }
 
 /* =====================================================
@@ -225,15 +244,64 @@ function getParadaLatLng(p) {
   return [latitude, longitude];
 }
 
-// ✅ incluir: denominacion=parada + uso=fija/recorrido
-function isMarcadorVisible(p) {
-  const d = String(p?.denominacion || "").toLowerCase().trim();
-  const uso = String(p?.uso || "").toLowerCase().trim();
-  return d === "parada" || uso === "fija" || uso === "recorrido";
-}
-
 function distMeters(a, b) {
   return map.distance(a, b);
+}
+
+/**
+ * ✅ REGLA NUEVA (TU PEDIDO):
+ * - denominacion="referencial": SÍ se considera para crear la ruta
+ *   y su marcador es un puntito pequeño, mismo color, SIN popup.
+ * - denominacion="parada": marcador normal con popup.
+ */
+function getDenom(p) {
+  return String(p?.denominacion || "").toLowerCase().trim();
+}
+
+function getMarkerSpec(p, linea) {
+  const denom = getDenom(p);
+  const color = linea?.color || "#000";
+
+  if (denom === "referencial") {
+    return {
+      draw: true,
+      popup: false,
+      style: {
+        radius: 2.6,
+        color,
+        fillColor: color,
+        fillOpacity: 0.85,
+        weight: 1,
+        opacity: 0.9
+      }
+    };
+  }
+
+  // "parada" (y cualquier otra no referencial que quieras mostrar como parada)
+  return {
+    draw: true,
+    popup: true,
+    style: {
+      radius: 7,
+      color,
+      fillColor: color,
+      fillOpacity: 0.9,
+      weight: 2,
+      opacity: 1
+    }
+  };
+}
+
+/**
+ * ✅ Para planificador BUS:
+ * - NO usar "referencial" como candidata de subida/bajada (evita sugerencias raras).
+ * - sí usar "parada"/fija/recorrido.
+ */
+function isStopCandidateForBoardAlight(p) {
+  const denom = getDenom(p);
+  if (denom === "referencial") return false;
+  const uso = String(p?.uso || "").toLowerCase().trim();
+  return denom === "parada" || uso === "fija" || uso === "recorrido";
 }
 
 function findNearestCoordOnPath(point, coords) {
@@ -314,152 +382,156 @@ function sortByNumeralStable(arr) {
 }
 
 /* =====================================================
+   ✅ Paradas por lineasruralpasan (robusto)
+===================================================== */
+function normCode(x) {
+  const s = String(x ?? "").trim().toLowerCase();
+  return s.replace(/\s+/g, "").replace(/[-_]/g, "");
+}
+
+function extractCodesFromLineasruralpasan(p) {
+  const arr = Array.isArray(p?.lineasruralpasan) ? p.lineasruralpasan : [];
+  const out = [];
+  for (const it of arr) {
+    if (typeof it === "string" || typeof it === "number") {
+      out.push(normCode(it));
+      continue;
+    }
+    if (it && typeof it === "object") {
+      if (it.codigo != null) out.push(normCode(it.codigo));
+      else if (it.code != null) out.push(normCode(it.code));
+      else if (it.id != null) out.push(normCode(it.id));
+    }
+  }
+  return out.filter(Boolean);
+}
+
+function belongsToLineaByArray(p, codigoLinea) {
+  const need = normCode(codigoLinea);
+  if (!need) return false;
+  return extractCodesFromLineasruralpasan(p).includes(need);
+}
+
+async function getParadasRuralesByLineaPasan(codigoLinea) {
+  const code = normCode(codigoLinea);
+
+  const all = await getCollectionCache("paradas_rurales");
+  const arr = Array.isArray(all) ? all : [];
+
+  const filtered = arr.filter(p => {
+    if (!p?.activo) return false;
+    if (normStr(p?.tipo) !== "rural") return false;
+
+    const codes = extractCodesFromLineasruralpasan(p);
+    return codes.includes(code);
+  });
+
+  if (filtered.length) return filtered;
+
+  // fallback legacy
+  try {
+    const fb = await getParadasByLinea(String(codigoLinea || ""), { tipo: "rural", sentido: "Ida" });
+    return Array.isArray(fb) ? fb : [];
+  } catch {
+    return [];
+  }
+}
+
+/* =====================================================
    ✅ ESQUEMAS DE ORDEN (SELECCIÓN POR LÍNEA)
-   - Esquema A (actual): SOLO líneas con denominacion === "Entra Sevilla"
-   - Esquema B (escalable): por lineasruralpasan + numeral (pfi inicio ida, pfv final vuelta)
+   - "Entra Sevilla": pfi -> pfis -> recorrido (IDA)
+                     recorrido -> pfvs -> pfv (VUELTA)
+   ✅ FIX: solo stops donde lineasruralpasan incluya el código
 ===================================================== */
 function usesSevillaSchema(linea) {
   return normLite(linea?.denominacion) === "entra sevilla";
 }
 
-/**
- * Esquema A (actual): orden por prefijos + numeral
- * IDA: pfi -> pfis -> prism -> resto
- * VUELTA: prvsm -> pfvsm -> pfvs -> pfv -> resto
- */
-// ✅ Esquema 1 (Entra Sevilla)
-// Reglas:
-// - IDA:  pfi  -> pfis -> (recorrido de la línea por lineasruralpasan)
-// - VUELTA: (recorrido de la línea por lineasruralpasan) -> pfvs -> pfv
-// Orden siempre por numeral (fallback: orden, fallback: número en código)
+function dedupByCodigo(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const p of (Array.isArray(arr) ? arr : [])) {
+    const key = String(p?.codigo || "").trim();
+    if (!key) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
 
-function buildOrderedStops_Sevilla(paradasAll, sentido, codigoLinea) {
-  const s = normStr(sentido);              // "ida" | "vuelta"
-  const lineNeed = normCodeLoose(codigoLinea);
+function buildOrderedStops_Sevilla(paradasAll, sentidoLower, linea) {
+  const s = normStr(sentidoLower);
+  const codigoLinea = linea?.codigo;
 
-  // 1) Filtra por sentido (clave: no mezclar ida/vuelta)
+  // ✅ SOLO paradas del sentido + de esta línea
   const base = (Array.isArray(paradasAll) ? paradasAll : [])
-    .filter(p => normStr(p?.sentido) === s);
+    .filter(p => normStr(p?.sentido) === s)
+    .filter(p => belongsToLineaByArray(p, codigoLinea));
 
-  // Helpers: prefijo / numeral / pertenencia a línea
-  function normCodeLoose(x) {
-    const t = String(x ?? "").trim().toLowerCase();
-    return t.replace(/\s+/g, "").replace(/[-_]/g, "");
+  // ✅ FIX: detectar "fijas" por uso O por prefijo (pfi/pfis/pfv/pfvs)
+  const pref = (p) => getPrefix(p);
+  const isFixedByPrefix =
+    (p) => pref(p).startsWith("pfi") || pref(p).startsWith("pfis") || pref(p).startsWith("pfv") || pref(p).startsWith("pfvs");
+
+  const isRec  = (p) => normStr(p?.uso) === "recorrido";
+  const isFija = (p) => normStr(p?.uso) === "fija" || isFixedByPrefix(p);
+
+  const isPfi  = (p) => pref(p).startsWith("pfi")  && !pref(p).startsWith("pfis");
+  const isPfis = (p) => pref(p).startsWith("pfis");
+  const isPfvs = (p) => pref(p).startsWith("pfvs");
+  const isPfv  = (p) => pref(p).startsWith("pfv")  && !pref(p).startsWith("pfvs");
+
+  const recorrido = sortByNumeralStable(base.filter(isRec));
+  const fijas = base.filter(p => isFija(p) && !isRec(p));
+
+  if (s === "ida") {
+    // ✅ IDA: pfi asc -> pfis asc -> recorrido asc
+    const pfi  = sortByNumeralStable(fijas.filter(isPfi));
+    const pfis = sortByNumeralStable(fijas.filter(isPfis));
+    return dedupByCodigo([...pfi, ...pfis, ...recorrido]);
   }
 
-  function extractLineCodes(p) {
-    const arr = Array.isArray(p?.lineasruralpasan) ? p.lineasruralpasan : [];
-    const out = [];
-    for (const it of arr) {
-      if (typeof it === "string" || typeof it === "number") {
-        out.push(normCodeLoose(it));
-        continue;
-      }
-      if (it && typeof it === "object") {
-        if (it.codigo != null) out.push(normCodeLoose(it.codigo));
-        else if (it.code != null) out.push(normCodeLoose(it.code));
-        else if (it.id != null) out.push(normCodeLoose(it.id));
-      }
-    }
-    return out.filter(Boolean);
+  if (s === "vuelta") {
+    // (mantienes tu vuelta como ya estaba funcionando)
+    const pfvs = sortByNumeralStable(fijas.filter(isPfvs));
+    const pfv  = sortByNumeralStable(fijas.filter(isPfv));
+    return dedupByCodigo([...recorrido, ...pfvs, ...pfv]);
   }
 
-  function belongsToLinea(p) {
-    if (!lineNeed) return false;
-    const codes = extractLineCodes(p);
-    return codes.includes(lineNeed);
-  }
+  return dedupByCodigo(sortByNumeralStable(base));
+}
 
-  function parseCodigoParts(codigo) {
-    const c = String(codigo || "").trim().toLowerCase();
-    const m = c.match(/^([a-z_]+?)(\d+)$/);
-    if (!m) return { prefix: c, num: null };
-    return { prefix: m[1], num: Number(m[2]) };
-  }
+function buildOrderedStops_ByLineaPasan(paradasAll, sentido, codigoLinea) {
+  const s = normStr(sentido);
+  const code = normCode(codigoLinea);
 
-  function getNumeral(p) {
-    const n = Number(p?.numeral);
-    if (Number.isFinite(n)) return n;
+  const base = (Array.isArray(paradasAll) ? paradasAll : [])
+    .filter(p => normStr(p?.sentido) === s)
+    .filter(p => extractCodesFromLineasruralpasan(p).includes(code));
 
-    const o = Number(p?.orden);
-    if (Number.isFinite(o)) return o;
+  if (!base.length) return [];
 
-    const { num } = parseCodigoParts(p?.codigo);
-    return Number.isFinite(num) ? num : Infinity;
-  }
+  const isRec = (p) => normStr(p?.uso) === "recorrido";
+  const isFija = (p) => normStr(p?.uso) === "fija" || (!isRec(p)); // ✅ FIX: todo lo NO-recorrido se trata como fija
 
-  function sortByNumeralStable(arr) {
-    return [...arr].sort((a, b) => {
-      const na = getNumeral(a);
-      const nb = getNumeral(b);
-      if (na !== nb) return na - nb;
-      return String(a?.codigo || "").localeCompare(String(b?.codigo || ""));
-    });
-  }
-
-  function getPrefix(p) {
-    const { prefix } = parseCodigoParts(p?.codigo);
-    return String(prefix || "").toLowerCase().trim();
-  }
-
-  // Reglas de selección por grupos
-  const isUsoRecorrido = (p) => normStr(p?.uso) === "recorrido";
-  const isPfi = (p) => getPrefix(p).startsWith("pfi");   // pfi0, pfi1...
-  const isPfis = (p) => getPrefix(p).startsWith("pfis"); // pfis0...
-  const isPfvs = (p) => getPrefix(p).startsWith("pfvs"); // pfvs1...
-  const isPfv = (p) => getPrefix(p).startsWith("pfv");   // pfv0...
-
-  // Grupo: paradas "recorrido" que pertenecen a la línea (por array)
-  const recorridoLinea = base.filter(p => isUsoRecorrido(p) && belongsToLinea(p));
-
-  // ✅ Importante: asegurar consecutividad por numeral
-  // Tomamos el "tramo" desde el numeral más bajo hasta el más alto donde siga existiendo la línea.
-  // Si hay huecos, igual avanzamos; si el conjunto es disjunto, tomamos todo el conjunto ordenado.
-  function buildRecorridoConsecutivo(recArr) {
-    const ord = sortByNumeralStable(recArr);
-    // si no quieres recortar nada, devuelve ord directo:
-    // return ord;
-
-    // Versión "tramo principal": del minNumeral al maxNumeral presentes
-    const nums = ord.map(getNumeral).filter(n => Number.isFinite(n));
-    if (!nums.length) return ord;
-
-    const minN = Math.min(...nums);
-    const maxN = Math.max(...nums);
-
-    // Incluimos solo los que estén dentro del rango [minN..maxN]
-    // (normalmente será todo; ayuda si hay valores raros)
-    const out = ord.filter(p => {
-      const n = getNumeral(p);
-      return Number.isFinite(n) && n >= minN && n <= maxN;
-    });
-
-    return out.length ? out : ord;
-  }
-
-  const tramoRecorrido = buildRecorridoConsecutivo(recorridoLinea);
-
-  // Armar salida según sentido
   let out = [];
 
   if (s === "ida") {
-    const pfi = sortByNumeralStable(base.filter(isPfi));
-    const pfis = sortByNumeralStable(base.filter(isPfis));
-
-    // IDA: pfi -> pfis -> recorridoLinea
-    out = [...pfi, ...pfis, ...tramoRecorrido];
+    // ✅ IDA: fijas (incluye referenciales) -> recorrido
+    const fijas = sortByNumeralStable(base.filter(isFija));
+    const rec   = sortByNumeralStable(base.filter(isRec));
+    out = [...fijas, ...rec];
   } else if (s === "vuelta") {
-    const pfvs = sortByNumeralStable(base.filter(isPfvs));
-    const pfv = sortByNumeralStable(base.filter(isPfv));
-
-    // VUELTA: recorridoLinea -> pfvs -> pfv
-    out = [...tramoRecorrido, ...pfvs, ...pfv];
+    // ✅ VUELTA: recorrido -> fijas (para que termine en fija finderuta=true si existe)
+    const rec   = sortByNumeralStable(base.filter(isRec));
+    const fijas = sortByNumeralStable(base.filter(isFija));
+    out = [...rec, ...fijas];
   } else {
-    // fallback: por si llega algo raro
     out = sortByNumeralStable(base);
   }
 
-  // dedup por codigo (por si algún grupo se solapa)
+  // dedup por codigo
   const seen = new Set();
   const final = [];
   for (const p of out) {
@@ -471,80 +543,130 @@ function buildOrderedStops_Sevilla(paradasAll, sentido, codigoLinea) {
   }
   return final;
 }
+function buildOrderedStopsForLinea(paradasAll, sentidoLower, linea) {
+  const s = normStr(sentidoLower);
 
-/**
- * Esquema B (escalable):
- * - Filtra SOLO paradas cuyo lineasruralpasan incluye el código de la línea
- * - Ordena por numeral (y desempate por codigo)
- * - Mantiene pfi como “inicio” natural en ida, y pfv como “final” natural en vuelta (si existen)
- *   (no fuerza prefijos; el orden lo manda el numeral)
- */
-function buildOrderedStops_ByLineaPasan(paradasAll, sentido, codigoLinea) {
-  const s = normStr(sentido);
-  const code = normCode(codigoLinea);
-
-  const base = (Array.isArray(paradasAll) ? paradasAll : [])
-    .filter(p => normStr(p?.sentido) === s)
-    .filter(p => {
-      const codes = extractCodesFromLineasruralpasan(p);
-      return codes.includes(code);
-    });
-
-  // si por alguna razón no hay nada, devolvemos vacío (caller hace fallback)
-  if (!base.length) return [];
-
-  // Orden principal por numeral
-  const sorted = sortByNumeralStable(base);
-
-  // Dedup por codigo
-  const seen = new Set();
-  const final = [];
-  for (const p of sorted) {
-    const key = String(p?.codigo || "").trim();
-    if (!key) continue;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    final.push(p);
-  }
-  return final;
-}
-
-/**
- * Wrapper: decide qué esquema usar según la línea
- */
-function buildOrderedStopsForLinea(paradasAll, sentido, linea) {
-  const s = normStr(sentido);
-
-  // ✅ Esquema A (solo "Entra Sevilla")
   if (usesSevillaSchema(linea)) {
-    return buildOrderedStops_Sevilla(paradasAll, s, linea?.codigo);
+    return buildOrderedStops_Sevilla(paradasAll, s, linea);
   }
 
-  // ✅ Esquema B (escalable: por lineasruralpasan + numeral)
-  const out = buildOrderedStops_ByLineaPasan(paradasAll, s, linea?.codigo);
-
-  // fallback: si por alguna razón no encontró nada con lineasruralpasan
-  if (!out.length) {
-    return buildOrderedStops_Sevilla(paradasAll, s, linea?.codigo);
-  }
-
+  const out = buildOrderedStops_ByLineaPasan(paradasAll, s, linea);
+  if (!out.length) return buildOrderedStops_Sevilla(paradasAll, s, linea);
   return out;
 }
 
-/**
- * finderuta=true SOLO en VUELTA => corta el listado allí
- */
-function cutStopsAtFinDeRuta(paradas, sentidoLower) {
+/* =====================================================
+   ✅ FIN DE RUTA (IDA y VUELTA)
+   - Corta en la ÚLTIMA parada con finderuta=true (incluida)
+   - Si no hay finderuta:
+       IDA: corta en la última con uso=recorrido (incluida)
+       VUELTA: no corta (se usa toda la lista)
+===================================================== */
+function cutStopsAtEnd(paradas, sentidoLower) {
   if (!Array.isArray(paradas) || !paradas.length) return [];
-  if (normStr(sentidoLower) !== "vuelta") return paradas;
 
-  const idx = paradas.findIndex(p => p?.finderuta === true);
-  if (idx === -1) return paradas;
-  return paradas.slice(0, idx + 1);
+  let lastIdx = -1;
+  for (let i = 0; i < paradas.length; i++) {
+    if (paradas[i]?.finderuta === true) lastIdx = i;
+  }
+  if (lastIdx !== -1) return paradas.slice(0, lastIdx + 1);
+
+  if (normStr(sentidoLower) === "ida") {
+    let lastRec = -1;
+    for (let i = 0; i < paradas.length; i++) {
+      if (normStr(paradas[i]?.uso) === "recorrido") lastRec = i;
+    }
+    if (lastRec !== -1) return paradas.slice(0, lastRec + 1);
+  }
+
+  return paradas;
 }
 
 /* =====================================================
-   HORARIO: parse / generación
+   OSRM: distancia de ruta (para escoger bajada con auto más corto)
+===================================================== */
+async function osrmRouteDistanceMeters(fromLL, toLL, profile = "driving") {
+  try {
+    const [lat1, lon1] = fromLL;
+    const [lat2, lon2] = toLL;
+    const url =
+      `https://router.project-osrm.org/route/v1/${encodeURIComponent(profile)}` +
+      `/${lon1},${lat1};${lon2},${lat2}?overview=false&alternatives=false&steps=false`;
+    const res = await fetch(url);
+    if (!res.ok) return Infinity;
+    const json = await res.json();
+    const d = json?.routes?.[0]?.distance;
+    return Number.isFinite(d) ? d : Infinity;
+  } catch {
+    return Infinity;
+  }
+}
+
+/* =====================================================
+   ✅ NUEVO: dibujar tramo "auto" dentro del layer del transporte
+===================================================== */
+async function drawDriveOSRMIntoLayer(layerGroup, fromLL, toLL, color = "#0d6efd") {
+  try {
+    if (!layerGroup || !fromLL || !toLL) return null;
+
+    const [lat1, lon1] = fromLL;
+    const [lat2, lon2] = toLL;
+
+    const url =
+      `https://router.project-osrm.org/route/v1/driving/` +
+      `${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.routes?.length) return null;
+
+    const r = data.routes[0];
+    const coords = r.geometry.coordinates.map(c => [c[1], c[0]]);
+    const line = L.polyline(coords, { color, weight: 5 }).addTo(layerGroup);
+
+    return { route: r, line };
+  } catch {
+    return null;
+  }
+}
+
+/* =====================================================
+   ✅ DIBUJO RUTA RURAL (ANTI-OSRM-CRUCE)
+   - Para segmentos donde ambos puntos son uso="recorrido":
+       dibuja línea directa (straight)
+   - Caso contrario: OSRM siguiendo calles
+   ✅ Importante: "referencial" YA viene en la lista y por eso entra en la ruta
+===================================================== */
+async function drawRuralRouteSmart(paradas, linea, routesGroup) {
+  const color = linea?.color || "#000";
+
+  // ✅ Respeta el orden recibido (ya viene ordenado por numeral en tu pipeline)
+  const coordsOrdered = (Array.isArray(paradas) ? paradas : [])
+    .map(p => getParadaLatLng(p))
+    .filter(Boolean);
+
+  if (coordsOrdered.length < 2) return null;
+
+  // ✅ OSRM tiene límites: dividimos en bloques para evitar fallos con muchas paradas
+  const CHUNK = 80; // puedes bajar a 60 si OSRM se pone inestable
+  let any = false;
+
+  // Conexión SIEMPRE por calles, en el orden del array
+  for (let i = 0; i < coordsOrdered.length - 1; i += (CHUNK - 1)) {
+    const slice = coordsOrdered.slice(i, i + CHUNK);
+    if (slice.length < 2) continue;
+
+    const lineLayer = await drawLineRouteFollowingStreets(slice, color);
+    if (lineLayer) {
+      routesGroup.addLayer(lineLayer);
+      any = true;
+    }
+  }
+
+  return any;
+}
+/* =====================================================
+   HORARIO: parse / generación (para modal de próximas salidas)
 ===================================================== */
 function parseHHMM(s) {
   const m = String(s || "").trim().match(/^(\d{1,2}):(\d{2})$/);
@@ -566,36 +688,6 @@ function nowMinutes(now = new Date()) {
   return now.getHours() * 60 + now.getMinutes();
 }
 
-function nextDepartureDeltaMin(linea, sentidoLower, now = new Date()) {
-  const cur = nowMinutes(now);
-
-  const ida = Array.isArray(linea?.horario_ida) ? linea.horario_ida : [];
-  const ret = Array.isArray(linea?.horario_retorno) ? linea.horario_retorno : [];
-
-  const arr = (normStr(sentidoLower) === "vuelta") ? ret : ida;
-  const times = arr.map(parseHHMM).filter(v => v != null).sort((a, b) => a - b);
-
-  if (times.length) {
-    for (const t of times) if (t >= cur) return (t - cur);
-    return (24 * 60 - cur) + times[0];
-  }
-
-  // fallback por rango inicio/fin (si no hay lista)
-  const ini = parseHHMM(linea?.horario_inicio);
-  const fin = parseHHMM(linea?.horario_fin);
-  if (ini == null || fin == null) return 9999;
-
-  if (cur <= ini) return ini - cur;
-
-  if (ini <= fin) {
-    if (cur <= fin) return 0;
-    return (24 * 60 - cur) + ini;
-  } else {
-    if (cur >= ini || cur <= fin) return 0;
-    return ini - cur;
-  }
-}
-
 function getFreqMin(linea) {
   const a = Number(linea?.frecuencia_min);
   const b = Number(linea?.frecuencia_max);
@@ -604,12 +696,19 @@ function getFreqMin(linea) {
   return null;
 }
 
-function departuresNextHour_Ida(linea, now = new Date(), windowMin = 60) {
+function departuresNextHour(linea, sentidoLower, now = new Date(), windowMin = 60) {
   const start = nowMinutes(now);
   const end = start + windowMin;
 
   const ida = Array.isArray(linea?.horario_ida) ? linea.horario_ida : [];
-  const list = ida.map(parseHHMM).filter(v => v != null).sort((a, b) => a - b);
+  const ret = Array.isArray(linea?.horario_retorno) ? linea.horario_retorno : [];
+
+  const listRaw = (normStr(sentidoLower) === "vuelta") ? ret : ida;
+  const list = (Array.isArray(listRaw) ? listRaw : [])
+    .map(parseHHMM)
+    .filter(v => v != null)
+    .sort((a, b) => a - b);
+
   if (list.length) {
     return list.filter(t => t >= start && t <= end).map(fmtHHMM);
   }
@@ -617,9 +716,7 @@ function departuresNextHour_Ida(linea, now = new Date(), windowMin = 60) {
   const ini = parseHHMM(linea?.horario_inicio);
   const fin = parseHHMM(linea?.horario_fin);
   const freq = getFreqMin(linea);
-
-  if (ini == null || fin == null) return [];
-  if (!freq) return [];
+  if (ini == null || fin == null || !freq) return [];
 
   const out = [];
   const inWindow = (t) => t >= start && t <= end;
@@ -659,120 +756,6 @@ function departuresNextHour_Ida(linea, now = new Date(), windowMin = 60) {
   return out;
 }
 
-function nextReturnTime(linea, now = new Date()) {
-  const cur = nowMinutes(now);
-  const ret = Array.isArray(linea?.horario_retorno) ? linea.horario_retorno : [];
-  const list = ret.map(parseHHMM).filter(v => v != null).sort((a, b) => a - b);
-  if (list.length) {
-    const t = list.find(x => x >= cur);
-    if (t != null) return fmtHHMM(t);
-    return fmtHHMM(list[0]);
-  }
-
-  const d = nextDepartureDeltaMin(linea, "vuelta", now);
-  if (!Number.isFinite(d) || d >= 9999) return "";
-  return fmtHHMM(cur + d);
-}
-
-/* =====================================================
-   ✅ Paradas por lineasruralpasan (robusto)
-===================================================== */
-function normCode(x) {
-  const s = String(x ?? "").trim().toLowerCase();
-  return s.replace(/\s+/g, "").replace(/[-_]/g, "");
-}
-
-function extractCodesFromLineasruralpasan(p) {
-  const arr = Array.isArray(p?.lineasruralpasan) ? p.lineasruralpasan : [];
-  const out = [];
-  for (const it of arr) {
-    if (typeof it === "string" || typeof it === "number") {
-      out.push(normCode(it));
-      continue;
-    }
-    if (it && typeof it === "object") {
-      if (it.codigo != null) out.push(normCode(it.codigo));
-      else if (it.code != null) out.push(normCode(it.code));
-      else if (it.id != null) out.push(normCode(it.id));
-    }
-  }
-  return out;
-}
-
-async function getParadasRuralesByLineaPasan(codigoLinea) {
-  const code = normCode(codigoLinea);
-
-  const all = await getCollectionCache("paradas_rurales");
-  const arr = Array.isArray(all) ? all : [];
-
-  const filtered = arr.filter(p => {
-    if (!p?.activo) return false;
-    if (normStr(p?.tipo) !== "rural") return false;
-
-    const codes = extractCodesFromLineasruralpasan(p);
-    return codes.includes(code);
-  });
-
-  if (filtered.length) return filtered;
-
-  // fallback legacy
-  try {
-    const fb = await getParadasByLinea(String(codigoLinea || ""), { tipo: "rural", sentido: "Ida" });
-    return Array.isArray(fb) ? fb : [];
-  } catch {
-    return [];
-  }
-}
-
-/* =====================================================
-   OSRM: distancia de ruta (para escoger bajada con auto más corto)
-===================================================== */
-async function osrmRouteDistanceMeters(fromLL, toLL, profile = "driving") {
-  try {
-    const [lat1, lon1] = fromLL;
-    const [lat2, lon2] = toLL;
-    const url =
-      `https://router.project-osrm.org/route/v1/${encodeURIComponent(profile)}` +
-      `/${lon1},${lat1};${lon2},${lat2}?overview=false&alternatives=false&steps=false`;
-    const res = await fetch(url);
-    if (!res.ok) return Infinity;
-    const json = await res.json();
-    const d = json?.routes?.[0]?.distance;
-    return Number.isFinite(d) ? d : Infinity;
-  } catch {
-    return Infinity;
-  }
-}
-
-/* =====================================================
-   ✅ NUEVO: dibujar tramo "auto" dentro del layer del transporte
-   (NO routeOverlay global)
-===================================================== */
-async function drawDriveOSRMIntoLayer(layerGroup, fromLL, toLL, color = "#0d6efd") {
-  try {
-    if (!layerGroup || !fromLL || !toLL) return null;
-
-    const [lat1, lon1] = fromLL;
-    const [lat2, lon2] = toLL;
-
-    const url =
-      `https://router.project-osrm.org/route/v1/driving/` +
-      `${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson`;
-
-    const res = await fetch(url);
-    const data = await res.json();
-    if (!data.routes?.length) return null;
-
-    const r = data.routes[0];
-    const coords = r.geometry.coordinates.map(c => [c[1], c[0]]);
-    const line = L.polyline(coords, { color, weight: 5 }).addTo(layerGroup);
-
-    return { route: r, line };
-  } catch {
-    return null;
-  }
-}
-
 /* =====================================================
    BOTÓN: próximas salidas (debajo del select sentido)
 ===================================================== */
@@ -792,45 +775,64 @@ function upsertDeparturesButton(container, lineas, ctx = {}) {
 
   btn.onclick = async () => {
     const now = new Date();
-    const rows = [];
+    const rowsSal = [];
+    const rowsRet = [];
 
-    const sorted = [...(Array.isArray(lineas) ? lineas : [])].sort((a, b) => (Number(a?.orden) || 0) - (Number(b?.orden) || 0));
+    const sorted = [...(Array.isArray(lineas) ? lineas : [])]
+      .sort((a, b) => (Number(a?.orden) || 0) - (Number(b?.orden) || 0));
 
     for (const l of sorted) {
       if (!l?.activo) continue;
       if (normStr(l?.tipo) !== "rural") continue;
 
-      const salidas = departuresNextHour_Ida(l, now, 60);
-      if (!salidas.length) continue;
-
-      const retTxt = nextReturnTime(l, now);
       const op = isLineOperatingNow(l, now);
 
-      rows.push(`
-        <div class="p-2 border rounded mb-2">
-          <div class="d-flex justify-content-between align-items-start gap-2">
-            <div>
-              <div style="font-weight:700">${l.codigo || ""} ${l.nombre ? `- ${l.nombre}` : ""}</div>
-              <div class="small text-muted">🧭 Sentido recomendado en popup de paradas (referencial)</div>
+      const salidas = departuresNextHour(l, "ida", now, 60);
+      if (salidas.length) {
+        rowsSal.push(`
+          <div class="p-2 border rounded mb-2">
+            <div class="d-flex justify-content-between align-items-start gap-2">
+              <div>
+                <div style="font-weight:700">${l.codigo || ""} ${l.nombre ? `- ${l.nombre}` : ""}</div>
+              </div>
+              <span class="badge ${op ? "text-bg-success" : "text-bg-warning"}">${op ? "Operativa" : "Fuera de servicio"}</span>
             </div>
-            <span class="badge ${op ? "text-bg-success" : "text-bg-warning"}">${op ? "Operativa" : "Fuera de servicio"}</span>
+            <div class="mt-2">
+              <b>Salidas (ida) en la próxima hora:</b><br>
+              ${salidas.map(x => `<span class="badge text-bg-light border me-1 mb-1">${x}</span>`).join("")}
+            </div>
           </div>
+        `);
+      }
 
-          <div class="mt-2">
-            <b>Salidas (ida) en la próxima hora:</b><br>
-            ${salidas.map(x => `<span class="badge text-bg-light border me-1 mb-1">${x}</span>`).join("")}
+      const retornos = departuresNextHour(l, "vuelta", now, 60);
+      if (retornos.length) {
+        rowsRet.push(`
+          <div class="p-2 border rounded mb-2">
+            <div class="d-flex justify-content-between align-items-start gap-2">
+              <div>
+                <div style="font-weight:700">${l.codigo || ""} ${l.nombre ? `- ${l.nombre}` : ""}</div>
+              </div>
+              <span class="badge ${op ? "text-bg-success" : "text-bg-warning"}">${op ? "Operativa" : "Fuera de servicio"}</span>
+            </div>
+            <div class="mt-2">
+              <b>Retornos (vuelta) en la próxima hora:</b><br>
+              ${retornos.map(x => `<span class="badge text-bg-light border me-1 mb-1">${x}</span>`).join("")}
+            </div>
           </div>
-
-          ${retTxt ? `<div class="mt-2"><b>Próximo retorno (vuelta) aprox.:</b> <span class="badge text-bg-secondary">${retTxt}</span></div>` : ""}
-        </div>
-      `);
+        `);
+      }
     }
 
-    const html = rows.length
-      ? rows.join("")
+    const htmlSal = rowsSal.length
+      ? rowsSal.join("")
       : `<div class="alert alert-warning py-2 mb-0">No hay salidas (ida) registradas en la próxima hora.</div>`;
 
-    showDeparturesModal(html, now);
+    const htmlRet = rowsRet.length
+      ? rowsRet.join("")
+      : `<div class="alert alert-warning py-2 mb-0">No hay retornos (vuelta) registrados en la próxima hora.</div>`;
+
+    showDeparturesModal(htmlSal, htmlRet, now);
   };
 }
 
@@ -930,8 +932,9 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
 
 /* =====================================================
    MOSTRAR RUTA (RURAL)
-   ✅ Usa esquema A para "Entra Sevilla"
-   ✅ Usa esquema B (lineasruralpasan+numeral) para el resto
+   ✅ Ahora "referencial" sí:
+     - entra en la ruta (coords)
+     - muestra puntito sin popup
 ===================================================== */
 export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   clearTransportLayers();
@@ -940,15 +943,14 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   const sentidoSel = titleCase(normStr(opts.sentido));
   const sentidoLower = normStr(sentidoSel);
 
-  // ✅ clave: dataset de paradas según esquema
   const paradasRaw = usesSevillaSchema(linea)
     ? await getParadasByLinea(linea.codigo, { ...ctx, tipo: "rural", sentido: sentidoSel })
     : await getParadasRuralesByLineaPasan(linea.codigo);
 
   if (!paradasRaw?.length) return;
 
-const ordered = buildOrderedStopsForLinea(paradasRaw, sentidoLower, linea);
-const paradas = cutStopsAtFinDeRuta(ordered, sentidoLower);
+  const ordered = buildOrderedStopsForLinea(paradasRaw, sentidoLower, linea);
+  const paradas = cutStopsAtEnd(ordered, sentidoLower);
 
   setCurrentParadas(paradas);
   setCurrentStopOffsets(computeStopOffsets(paradas, linea));
@@ -966,36 +968,36 @@ const paradas = cutStopsAtFinDeRuta(ordered, sentidoLower);
     const ll = getParadaLatLng(p);
     if (!ll) continue;
 
+    // ✅ SIEMPRE entra en coords (incluye "referencial")
     coords.push(ll);
 
-    if (!isMarcadorVisible(p)) continue;
+    const spec = getMarkerSpec(p, linea);
+    if (!spec?.draw) continue;
 
-    const marker = L.circleMarker(ll, {
-      radius: 7,
-      color: linea.color || "#000",
-      fillOpacity: 0.9,
-      weight: 2
-    }).addTo(layerParadas);
+    const marker = L.circleMarker(ll, spec.style).addTo(layerParadas);
 
-    marker.bindPopup(buildStopPopupHTML(p, linea), { autoPan: true });
+    if (spec.popup) {
+      marker.bindPopup(buildStopPopupHTML(p, linea), { autoPan: true });
 
-    marker.on("popupopen", () => {
-      marker.setPopupContent(buildStopPopupHTML(p, linea));
-      startPopupLiveUpdate(marker, p);
-    });
+      marker.on("popupopen", () => {
+        marker.setPopupContent(buildStopPopupHTML(p, linea));
+        startPopupLiveUpdate(marker, p);
+      });
 
-    marker.on("popupclose", () => stopPopupLiveUpdate());
+      marker.on("popupclose", () => stopPopupLiveUpdate());
 
-    stopMarkers.push({ marker, parada: p });
+      stopMarkers.push({ marker, parada: p });
+    } else {
+      // ✅ "referencial": sin popup, pero lo guardamos igual para limpieza/estado
+      stopMarkers.push({ marker, parada: p });
+    }
   }
 
   setCurrentStopMarkers(stopMarkers);
 
   if (coords.length < 2) return;
 
-  const lineLayer = await drawLineRouteFollowingStreets(coords, linea.color || "#000");
-  if (lineLayer) routesGroup.addLayer(lineLayer);
-
+  await drawRuralRouteSmart(paradas, linea, routesGroup);
   map.fitBounds(L.latLngBounds(coords).pad(0.12));
 }
 
@@ -1016,10 +1018,37 @@ function buildIndexByLatLng(coords) {
   return m;
 }
 
+async function withTimeout(promise, ms = 12000) {
+  let t = null;
+  const timeout = new Promise((_, rej) => {
+    t = setTimeout(() => rej(new Error("timeout")), ms);
+  });
+  try {
+    const out = await Promise.race([promise, timeout]);
+    return out;
+  } finally {
+    if (t) clearTimeout(t);
+  }
+}
+
 export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {}) {
+  try {
+    return await withTimeout(_planAndShowBusStopsForPlace(userLoc, destPlace, ctx, ui), 12000);
+  } catch (e) {
+    if (ui?.infoEl && !ctx?.dryRun) {
+      ui.infoEl.innerHTML = `
+        <div class="alert alert-warning py-2 mb-0">
+          ❌ No se encontró una ruta óptima en bus (tiempo de búsqueda excedido).
+        </div>
+      `;
+    }
+    return null;
+  }
+}
+
+async function _planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {}) {
   if (!userLoc || !destPlace?.ubicacion) return null;
 
-  // ✅ GEO check (igual que selects)
   if (!geoMatches(ctx, destPlace)) {
     if (ui?.infoEl && !ctx?.dryRun) {
       ui.infoEl.innerHTML = `
@@ -1037,7 +1066,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
 
-  // ✅ FIX: respetar geoFilter salvo casos especiales
   const lineas = await getLineasByTipo("rural", {
     ...ctx,
     ignoreGeoFilter: ctx?.ignoreGeoFilter === true || ctx?.specialSevilla === true
@@ -1088,14 +1116,14 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       for (const sentidoTry of sentidosToTry) {
         const sentidoLower = normStr(sentidoTry);
 
-        // ✅ esquema A/B según linea.denominacion
         const ordered = buildOrderedStopsForLinea(baseStops, sentidoLower, linea);
-        const paradas = cutStopsAtFinDeRuta(ordered, sentidoLower);
+        const paradas = cutStopsAtEnd(ordered, sentidoLower);
 
         const coords = paradas.map(getParadaLatLng).filter(Boolean);
         if (coords.length < 2) continue;
 
-        const visibles = paradas.filter(isMarcadorVisible);
+        // ✅ candidatos para subir/bajar: excluye "referencial"
+        const visibles = paradas.filter(isStopCandidateForBoardAlight);
         if (visibles.length < 2) continue;
 
         // SUBIDA
@@ -1121,15 +1149,18 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
         const idxBoard = findNearestCoordIndex(coords, boardLL);
         if (idxBoard < 0) continue;
 
-        // BAJADA: SOLO después de idxBoard
+        // BAJADA: SOLO después de idxBoard (usar paradas candidatas, no referenciales)
         const candidates = [];
         for (let i = idxBoard + 1; i < paradas.length; i++) {
-          const ll = getParadaLatLng(paradas[i]);
+          const pStop = paradas[i];
+          if (!isStopCandidateForBoardAlight(pStop)) continue;
+
+          const ll = getParadaLatLng(pStop);
           if (!ll) continue;
 
           const dLine = distMeters(destLoc, ll);
           if (dLine <= maxDest) {
-            candidates.push({ idx: i, ll, dLine, stop: paradas[i] });
+            candidates.push({ idx: i, ll, dLine, stop: pStop });
           }
         }
 
@@ -1149,7 +1180,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
           let tramoDist = 0;
           for (let j = 1; j < tramoCoords.length; j++) tramoDist += distMeters(tramoCoords[j - 1], tramoCoords[j]);
 
-          const dtMin = nextDepartureDeltaMin(linea, sentidoLower, now);
+          const dtMin = 0;
 
           const walkToDest = nearestCoordDest.d;
           const useAuto = walkToDest > WALK_AFTER_ALIGHT_M;
@@ -1215,7 +1246,7 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
         let tramoDist = 0;
         for (let j = 1; j < tramoCoords.length; j++) tramoDist += distMeters(tramoCoords[j - 1], tramoCoords[j]);
 
-        const dtMin = nextDepartureDeltaMin(linea, sentidoLower, now);
+        const dtMin = 0;
 
         const walkToDest = chosen.dLine;
         const useAuto = walkToDest > WALK_AFTER_ALIGHT_M;
@@ -1305,29 +1336,26 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
 
   const stopMarkers = [];
   for (const p of best.paradas) {
-    if (!isMarcadorVisible(p)) continue;
-
     const ll = getParadaLatLng(p);
     if (!ll) continue;
 
     const idx = idxMap.get(llKey(ll));
     if (idx == null) continue;
-
     if (idx < best.fromIdx || idx > best.toIdx) continue;
 
-    const marker = L.circleMarker(ll, {
-      radius: 7,
-      color: best.linea.color || "#000",
-      fillOpacity: 0.9,
-      weight: 2
-    }).addTo(layerStops);
+    const spec = getMarkerSpec(p, best.linea);
+    if (!spec?.draw) continue;
 
-    marker.bindPopup(buildStopPopupHTML(p, best.linea), { autoPan: true });
-    marker.on("popupopen", () => {
-      marker.setPopupContent(buildStopPopupHTML(p, best.linea));
-      startPopupLiveUpdate(marker, p);
-    });
-    marker.on("popupclose", () => stopPopupLiveUpdate());
+    const marker = L.circleMarker(ll, spec.style).addTo(layerStops);
+
+    if (spec.popup) {
+      marker.bindPopup(buildStopPopupHTML(p, best.linea), { autoPan: true });
+      marker.on("popupopen", () => {
+        marker.setPopupContent(buildStopPopupHTML(p, best.linea));
+        startPopupLiveUpdate(marker, p);
+      });
+      marker.on("popupclose", () => stopPopupLiveUpdate());
+    }
 
     stopMarkers.push({ marker, parada: p });
   }
@@ -1342,14 +1370,11 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     radius: 10, color: "#c62828", fillColor: "#c62828", fillOpacity: 1, weight: 3
   }).addTo(layerStops).bindPopup(`<b>⛔ Bajar aquí</b><br>${best.alightLabel}`);
 
-  // caminata a subir
   await drawDashedAccessRoute(userLoc, best.boardLL, "#666");
 
-  // ruta bus SOLO hasta la bajada
-  const ruralLine = await drawLineRouteFollowingStreets(best.tramoCoords, best.linea.color || "#000");
-  if (ruralLine) routesGroup.addLayer(ruralLine);
+  const tramoParadas = best.paradas.slice(best.fromIdx, best.toIdx + 1);
+  await drawRuralRouteSmart(tramoParadas, best.linea, routesGroup);
 
-  // final: caminar si <=700, caso contrario auto (DENTRO DEL routesGroup)
   if (best.useAuto) {
     await drawDriveOSRMIntoLayer(routesGroup, best.alightLL, destLoc, "#0d6efd");
   } else {
@@ -1365,13 +1390,6 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       🚌 Línea: <b>${best.linea.codigo}</b> - ${best.linea.nombre || ""}<br>
       🧭 Sentido: <b>${titleCase(normStr(best.sentido))}</b><br>
       ${op ? "✅ Operativa ahora" : "⛔ Fuera de servicio ahora"}<br>
-      ${(() => {
-        if (best.dtMin >= 9999) return `⏳ Próxima salida aprox.: <b>sin dato</b><br>`;
-        const h = Math.floor(best.dtMin / 60);
-        const m = best.dtMin % 60;
-        const txt = (h > 0) ? `${h} h ${m} min` : `${m} min`;
-        return `⏳ Próxima salida aprox.: <b>${txt}</b><br>`;
-      })()}
       🚶 Camina a subir (${best.boardLabel}): <b>${Math.round(best.boardDist)} m</b><br>
       ${best.useAuto
         ? `🏁 Bajar en: <b>${best.alightLabel}</b><br>🚗 Auto al destino.`
@@ -1379,6 +1397,11 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
       ${(!best.useAuto && exagerated)
         ? `<div class="alert alert-warning py-2 mt-2 mb-0">⚠️ Se encontró ruta pero requiere caminata grande.</div>`
         : ""}
+
+      <div class="small mt-2 text-muted">
+        * “Referencial” se dibuja como puntito sin popup, pero sí cuenta para la ruta.
+        “Fin de ruta” se corta por finderuta (última marcada).
+      </div>
     `;
   }
 

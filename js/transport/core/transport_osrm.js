@@ -76,13 +76,29 @@ async function fetchOSRMRouteChunk(latlngs, profile = "car") {
   };
 }
 
+// ✅ reduce “loops” con puntos muy cercanos (OSRM a veces pega vuelta completa)
+function stripNearDuplicates(latlngs, epsMeters = 6) {
+  if (!Array.isArray(latlngs) || latlngs.length < 2) return latlngs || [];
+  const out = [latlngs[0]];
+  for (let i = 1; i < latlngs.length; i++) {
+    const prev = out[out.length - 1];
+    const cur = latlngs[i];
+    const d = map.distance(prev, cur);
+    if (d >= epsMeters) out.push(cur);
+  }
+  return out;
+}
+
 export async function drawLineRouteFollowingStreets(latlngs, color = "#000") {
   if (!latlngs || latlngs.length < 2) return null;
 
-  const profile = "car";
-  const MAX_POINTS = 99;
+  const clean = stripNearDuplicates(latlngs, 6);
+  if (clean.length < 2) return null;
 
-  const chunks = chunkArray(latlngs, MAX_POINTS);
+  const profile = "car";
+  const MAX_POINTS = 90; // un poco menor para evitar rutas raras
+
+  const chunks = chunkArray(clean, MAX_POINTS);
   const full = [];
 
   for (let i = 0; i < chunks.length; i++) {
@@ -111,7 +127,7 @@ export async function drawLineRouteFollowingStreets(latlngs, color = "#000") {
     const osrmDist = r.distance || 0;
 
     // anti-loop chunk (solo para chunks cortos)
-    const isWeird = straight > 0 && straight <= 450 && osrmDist > straight * 2.2;
+    const isWeird = straight > 0 && straight <= 500 && osrmDist > straight * 2.2;
     const geom = isWeird ? points : r.coords;
 
     if (full.length && geom.length) geom.shift();
@@ -119,7 +135,7 @@ export async function drawLineRouteFollowingStreets(latlngs, color = "#000") {
   }
 
   if (!full.length) {
-    return L.polyline(latlngs, { color, weight: 4, opacity: 0.9 }).addTo(map);
+    return L.polyline(clean, { color, weight: 4, opacity: 0.9 }).addTo(map);
   }
 
   return L.polyline(full, { color, weight: 4, opacity: 0.9 }).addTo(map);

@@ -65,8 +65,7 @@ function tickPopupUpdate() {
     return;
   }
 
-  const popup = activePopupMarker.getPopup();
-  const el = popup?.getElement?.();
+  const el = activePopupMarker.getPopup()?.getElement?.();
   if (!el) return;
 
   const tipo = String(linea?.tipo || "").toLowerCase();
@@ -88,7 +87,7 @@ function tickPopupUpdate() {
     return;
   }
 
-  // RURAL: refresco completo (popup compacto)
+  // RURAL: refresco completo
   activePopupMarker.setPopupContent(buildStopPopupHTML(activePopupParada, linea));
 }
 
@@ -133,7 +132,7 @@ function formatWaitHumanFromMinutes(minsFloat) {
 }
 
 /* =====================================================
-   DÍAS (para que lr15 marque operativa bien)
+   DÍAS (para que opere bien)
 ===================================================== */
 function normDias(s) {
   return String(s || "")
@@ -176,12 +175,17 @@ function isOperatingTodayByDias(linea, now = new Date()) {
 }
 
 /* =====================================================
-   ✅ FIN DE RUTA (finderuta=true) o última
+   ✅ FIN DE RUTA:
+   - Si existe finderuta=true, el fin es la ÚLTIMA parada marcada
+   - Si no existe, la última parada del arreglo
 ===================================================== */
 function getEndStop(paradasOrdenadas) {
-  const fin = paradasOrdenadas?.find(p => p?.finderuta === true);
-  if (fin) return fin;
-  return paradasOrdenadas?.[paradasOrdenadas.length - 1] || null;
+  if (!Array.isArray(paradasOrdenadas) || !paradasOrdenadas.length) return null;
+  let last = null;
+  for (const p of paradasOrdenadas) {
+    if (p?.finderuta === true) last = p;
+  }
+  return last || paradasOrdenadas[paradasOrdenadas.length - 1] || null;
 }
 
 /* =====================================================
@@ -236,10 +240,6 @@ export function computeStopOffsets(paradasOrdenadas, linea) {
 
 /* =====================================================
    Próximo bus por parada
-   - URBANO: headway + windows (sin cambios)
-   - RURAL:
-      A) horario_ida/horario_retorno (emparejado por índice)
-      B) lr15-like: horario_inicio/fin + frecuencia_min/max
 ===================================================== */
 function isWeekend(date = new Date()) {
   const d = date.getDay();
@@ -306,7 +306,7 @@ function getNextBusInfoForStop(linea, paradasOrdenadas, parada, now = new Date()
   const offsetMin = key ? (offsets.get(key) || 0) : 0;
 
   /* ==========================
-     ✅ RURAL (popup nuevo)
+     ✅ RURAL
   ========================== */
   if (tipo === "rural") {
     // respeta días
@@ -333,7 +333,7 @@ function getNextBusInfoForStop(linea, paradasOrdenadas, parada, now = new Date()
     const depList = (sentido === "vuelta") ? ret : ida;
     const retList = (sentido === "vuelta") ? ida : ret; // emparejado por índice
 
-    const depPairs = (depList || [])
+    const depPairs = (Array.isArray(depList) ? depList : [])
       .map((t, idx) => ({ idx, depOriginMin: timeToMinutesStrict(t) }))
       .filter(x => x.depOriginMin != null)
       .sort((a, b) => a.depOriginMin - b.depOriginMin);
@@ -379,7 +379,7 @@ function getNextBusInfoForStop(linea, paradasOrdenadas, parada, now = new Date()
       const arrEnd = depOrigin + endOffset;
 
       let retHHMM = null;
-      if (retList?.length) {
+      if (Array.isArray(retList) && retList.length) {
         const tRet = retList[chosen.idx];
         const retMin = timeToMinutesStrict(tRet);
         if (retMin != null) retHHMM = minutesToHHMM(retMin);
@@ -398,7 +398,7 @@ function getNextBusInfoForStop(linea, paradasOrdenadas, parada, now = new Date()
       };
     }
 
-    // -------- MODO B: lr15-like (inicio/fin + frecuencia min/max) --------
+    // -------- MODO B: inicio/fin + frecuencia --------
     const start = timeToMinutesStrict(linea?.horario_inicio);
     const end = timeToMinutesStrict(linea?.horario_fin);
     const fmin = Number(linea?.frecuencia_min);
@@ -483,7 +483,7 @@ function getNextBusInfoForStop(linea, paradasOrdenadas, parada, now = new Date()
   }
 
   /* ==========================
-     ✅ URBANO (SIN CAMBIOS)
+     ✅ URBANO
   ========================== */
   const windows = getServiceWindowsUrbano(linea, now);
   const activeWin = pickActiveWindow(windows, nowMin);
@@ -548,15 +548,13 @@ function getNextBusInfoForStop(linea, paradasOrdenadas, parada, now = new Date()
 
 /* =====================================================
    HTML Popup
-   ✅ Urbano: igual que antes
-   ✅ Rural: compacto (no sobrecargado)
 ===================================================== */
 export function buildStopPopupHTML(parada, linea) {
   const lineaAct = getCurrentLinea() || linea;
   const paradasAct = getCurrentParadas();
   const tipo = String(lineaAct?.tipo || "").toLowerCase();
 
-  // ============ RURAL (compacto) ============
+  // ============ RURAL ============
   if (tipo === "rural") {
     const info = getNextBusInfoForStop(lineaAct, paradasAct, parada, new Date());
 
@@ -565,7 +563,6 @@ export function buildStopPopupHTML(parada, linea) {
 
     const estadoTxt = info?.operativo ? "✅ Operativa" : "⛔ No operativa";
 
-    // “Pasa en” en formato humano
     let pasaTxt = "—";
     if (info?.activo && typeof info.countdown === "number") {
       pasaTxt = formatWaitHumanFromMinutes(info.countdown / 60);
@@ -607,7 +604,7 @@ export function buildStopPopupHTML(parada, linea) {
     `;
   }
 
-  // ============ URBANO (SIN CAMBIOS) ============
+  // ============ URBANO ============
   const info = getNextBusInfoForStop(lineaAct, paradasAct, parada, new Date());
 
   const sentidoTxt = parada?.sentido ? `🧭 Sentido: ${parada.sentido}<br>` : "";

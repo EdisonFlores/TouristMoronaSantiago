@@ -1,5 +1,5 @@
 // js/transport/transport_controller.js
-import { clearTransportRoute, map as leafletMap } from "../map/map.js"; // ✅ cambia: ya NO importamos clearRoute
+import { clearTransportRoute, map as leafletMap } from "../map/map.js";
 import { clearTransportState } from "./core/transport_state.js";
 import { getCollectionCache } from "../app/cache_db.js";
 
@@ -12,7 +12,6 @@ import { planAndShowBusStopsForPlace as planUrbanoForPlace } from "./urbano/urba
 import { planAndShowBusStopsForPlace as planRuralForPlace } from "./rural/rural_controller.js";
 
 export function clearTransportLayers() {
-  // ✅ SOLO transporte, NO borra la ruta normal
   try { clearTransportRoute?.(); } catch {}
   try { clearTransportState?.(); } catch {}
 }
@@ -82,12 +81,24 @@ export async function hasBusCoverage({ map, userLoc, destLoc, radiusUrb = 2200, 
   return okU || okR;
 }
 
+// ✅ timeout global para modo bus (evita “1 minuto pensando”)
+async function withTimeout(promise, ms = 12000) {
+  let t = null;
+  const timeout = new Promise((_, rej) => {
+    t = setTimeout(() => rej(new Error("timeout")), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (t) clearTimeout(t);
+  }
+}
+
 export async function planAndShowBusStops(userLoc, destPlace, ctx = {}, ui = {}) {
   if (!userLoc || !destPlace?.ubicacion) return null;
 
   const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
 
-  // PRECHECK cobertura mínima
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
   const ok = await hasBusCoverage({ map: leafletMap, userLoc, destLoc });
 
@@ -129,70 +140,83 @@ export async function planAndShowBusStops(userLoc, destPlace, ctx = {}, ui = {})
     );
   }
 
-  if (preferred) {
-    let evalPreferred = null;
-    try {
-      evalPreferred = await runTipo(preferred, { dryRun: true, preserveLayers: true }, { infoEl: null });
-    } catch (e) {
-      console.warn(`Eval ${preferred} falló:`, e);
-    }
+  try {
+    return await withTimeout((async () => {
+      if (preferred) {
+        let evalPreferred = null;
+        try {
+          evalPreferred = await runTipo(preferred, { dryRun: true, preserveLayers: true }, { infoEl: null });
+        } catch (e) {
+          console.warn(`Eval ${preferred} falló:`, e);
+        }
 
-    if (evalPreferred) {
-      clearTransportLayers();
-      return runTipo(preferred, { dryRun: false, preserveLayers: false }, ui);
-    }
+        if (evalPreferred) {
+          clearTransportLayers();
+          return runTipo(preferred, { dryRun: false, preserveLayers: false }, ui);
+        }
 
-    const other = (preferred === "urbano") ? "rural" : "urbano";
+        const other = (preferred === "urbano") ? "rural" : "urbano";
 
-    let evalOther = null;
-    try {
-      evalOther = await runTipo(other, { dryRun: true, preserveLayers: true }, { infoEl: null });
-    } catch (e) {
-      console.warn(`Eval ${other} falló:`, e);
-    }
+        let evalOther = null;
+        try {
+          evalOther = await runTipo(other, { dryRun: true, preserveLayers: true }, { infoEl: null });
+        } catch (e) {
+          console.warn(`Eval ${other} falló:`, e);
+        }
 
-    if (!evalOther) {
-      if (ui?.infoEl) {
-        ui.infoEl.innerHTML = `
-          <div class="alert alert-warning py-2 mb-0">
-            ❌ No se encontró una ruta en bus para llegar a este destino.
-          </div>
-        `;
+        if (!evalOther) {
+          if (ui?.infoEl) {
+            ui.infoEl.innerHTML = `
+              <div class="alert alert-warning py-2 mb-0">
+                ❌ No se encontró una ruta en bus para llegar a este destino.
+              </div>
+            `;
+          }
+          return null;
+        }
+
+        clearTransportLayers();
+        return runTipo(other, { dryRun: false, preserveLayers: false }, ui);
       }
-      return null;
-    }
 
-    clearTransportLayers();
-    return runTipo(other, { dryRun: false, preserveLayers: false }, ui);
-  }
+      const evalCtx = { ...baseCtx, dryRun: true, preserveLayers: true };
 
-  const evalCtx = { ...baseCtx, dryRun: true, preserveLayers: true };
+      let urbanoEval = null;
+      let ruralEval = null;
 
-  let urbanoEval = null;
-  let ruralEval = null;
+      try { urbanoEval = await runTipo("urbano", evalCtx, { infoEl: null }); } catch (e) { console.warn("Eval urbano falló:", e); }
+      try { ruralEval  = await runTipo("rural",  evalCtx, { infoEl: null }); } catch (e) { console.warn("Eval rural falló:", e); }
 
-  try { urbanoEval = await runTipo("urbano", evalCtx, { infoEl: null }); } catch (e) { console.warn("Eval urbano falló:", e); }
-  try { ruralEval  = await runTipo("rural",  evalCtx, { infoEl: null }); } catch (e) { console.warn("Eval rural falló:", e); }
+      const uScore = Number.isFinite(urbanoEval?.score) ? urbanoEval.score : Infinity;
+      const rScore = Number.isFinite(ruralEval?.score) ? ruralEval.score : Infinity;
 
-  const uScore = Number.isFinite(urbanoEval?.score) ? urbanoEval.score : Infinity;
-  const rScore = Number.isFinite(ruralEval?.score) ? ruralEval.score : Infinity;
+      let winner = null;
+      if (uScore < rScore) winner = "urbano";
+      else if (rScore < uScore) winner = "rural";
+      else winner = urbanoEval ? "urbano" : (ruralEval ? "rural" : null);
 
-  let winner = null;
-  if (uScore < rScore) winner = "urbano";
-  else if (rScore < uScore) winner = "rural";
-  else winner = urbanoEval ? "urbano" : (ruralEval ? "rural" : null);
+      if (!winner) {
+        if (ui?.infoEl) {
+          ui.infoEl.innerHTML = `
+            <div class="alert alert-warning py-2 mb-0">
+              ❌ No se encontró una ruta en bus para llegar a este destino.
+            </div>
+          `;
+        }
+        return null;
+      }
 
-  if (!winner) {
+      clearTransportLayers();
+      return runTipo(winner, { dryRun: false, preserveLayers: false }, ui);
+    })(), 12000);
+  } catch (e) {
     if (ui?.infoEl) {
       ui.infoEl.innerHTML = `
         <div class="alert alert-warning py-2 mb-0">
-          ❌ No se encontró una ruta en bus para llegar a este destino.
+          ❌ No se encontró una ruta óptima en bus (tiempo de búsqueda excedido).
         </div>
       `;
     }
     return null;
   }
-
-  clearTransportLayers();
-  return runTipo(winner, { dryRun: false, preserveLayers: false }, ui);
 }

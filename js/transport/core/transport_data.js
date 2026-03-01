@@ -145,7 +145,6 @@ function isOperatingTodayByDias(linea, now = new Date()) {
 export function isLineOperatingNow(linea, now = new Date()) {
   if (!linea?.activo) return false;
 
-  // respeta días si existe
   if (!isOperatingTodayByDias(linea, now)) return false;
 
   const tipo = normStr(linea?.tipo);
@@ -308,7 +307,6 @@ export function formatLineScheduleHTML(linea) {
    ✅ HELPERS para matching de códigos (rural)
 ========================== */
 function normCodeLoose(x) {
-  // "L5", " l-5 ", "L_5" => "l5"
   const s = String(x ?? "").trim().toLowerCase();
   return s.replace(/\s+/g, "").replace(/[-_]/g, "");
 }
@@ -332,8 +330,6 @@ function extractRuralLineCodes(v) {
 
 /* ==========================
    LÍNEAS (cacheadas)
-   ctx.ignoreGeoFilter => trae TODO
-   ✅ CAMBIO: rural tolerante si no hay campo tipo
 ========================== */
 export async function getLineasByTipo(tipo, ctx = {}) {
   const t = normStr(tipo);
@@ -341,11 +337,10 @@ export async function getLineasByTipo(tipo, ctx = {}) {
   const all = await getCollectionCache(collection);
   const arr = (Array.isArray(all) ? all : []);
 
-  // ✅ helper de compatibilidad: rural acepta tipo vacío
   const okTipo = (l) => {
     const lt = normStr(l?.tipo);
     if (t === "urbano") return lt === "urbano";
-    if (t === "rural") return (lt === "rural" || !lt); // 👈 tolerante
+    if (t === "rural") return (lt === "rural" || !lt);
     return false;
   };
 
@@ -396,7 +391,7 @@ export async function getLineasByTipoAll(tipo, ctx = {}) {
 export async function getParadasByLinea(codigoLinea, ctx = {}) {
   const tipo = normStr(ctx?.tipo);
 
-  // ✅ RURAL: paradas_rurales
+  // ✅ RURAL
   if (tipo === "rural") {
     const all = await getCollectionCache("paradas_rurales");
     const paradas = [];
@@ -408,7 +403,6 @@ export async function getParadasByLinea(codigoLinea, ctx = {}) {
       if (!p?.activo) return;
       if (normStr(p?.tipo) !== "rural") return;
 
-      // ✅ robust: normaliza y soporta string/obj en lineasruralpasan
       const codes = extractRuralLineCodes(p?.lineasruralpasan);
       const okLinea = codes.includes(codeNeed);
       if (!okLinea) return;
