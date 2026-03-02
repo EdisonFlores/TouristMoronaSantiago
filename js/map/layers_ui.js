@@ -30,24 +30,6 @@ export function initLayersUI({
   const myLocCtrl = new MyLoc();
   myLocCtrl.addTo(map);
 
-  // Leyenda (control custom)
-  const Legend = L.Control.extend({
-    options: { position: "bottomright" },
-    onAdd() {
-      const div = L.DomUtil.create("div", "tm-legend");
-      div.innerHTML = legendHTML || `
-        <div class="tm-legend-title">Leyenda</div>
-        <div class="tm-legend-row"><span class="tm-dot tm-dot-route"></span> Ruta</div>
-        <div class="tm-legend-row"><span class="tm-dot tm-dot-access"></span> Accesos (a pie)</div>
-        <div class="tm-legend-row"><span class="tm-dot tm-dot-stops"></span> Paradas</div>
-      `;
-      L.DomEvent.disableClickPropagation(div);
-      return div;
-    }
-  });
-
-  const legendCtrl = new Legend();
-  legendCtrl.addTo(map);
 
   // helper para actualizar overlays sin recrear todo
   function updateOverlays(newOverlays = {}) {

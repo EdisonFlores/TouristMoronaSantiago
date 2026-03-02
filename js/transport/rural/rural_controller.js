@@ -34,7 +34,7 @@ import {
   setRouteLayer,
   setAccessLayer
 } from "../core/transport_state.js";
-
+import { getUserLocation } from "../../app/state.js";
 /* =====================================================
    ✅ NUEVO: validación geo (provincia/cantón/parroquia)
 ===================================================== */
@@ -873,6 +873,9 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
       selectLinea.innerHTML += `<option value="${l.codigo}">${l.codigo} - ${l.nombre}</option>`;
     });
 
+  // ✅ NUEVO: mostrar botón de próximas salidas apenas se elige Rural
+  upsertDeparturesButton(container, lineas, ctx);
+
   let currentLineaSel = null;
   const sentidosCache = ["Ida", "Vuelta"];
   let currentSentido = "";
@@ -902,6 +905,7 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
         coberturas: [],
       });
 
+      // (puede quedarse, no estorba)
       upsertDeparturesButton(container, lineas, ctx);
       return;
     }
@@ -920,6 +924,7 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
         coberturas: [],
       });
 
+      // (puede quedarse, no estorba)
       upsertDeparturesButton(container, lineas, ctx);
 
       if (!sentidoSel) return;
@@ -929,7 +934,6 @@ export async function cargarLineasTransporte(tipo, container, ctx = {}) {
     }
   };
 }
-
 /* =====================================================
    MOSTRAR RUTA (RURAL)
    ✅ Ahora "referencial" sí:
@@ -994,6 +998,55 @@ export async function mostrarRutaLinea(linea, opts = {}, ctx = {}) {
   }
 
   setCurrentStopMarkers(stopMarkers);
+
+  // ✅ NUEVO: resaltar (verde) la parada más cercana + ruta punteada desde el usuario
+  try {
+    const userLoc = getUserLocation?.();
+    if (userLoc && stopMarkers.length) {
+      let bestMarker = null;
+      let bestLL = null;
+      let bestD = Infinity;
+
+      for (const it of stopMarkers) {
+        const m = it?.marker;
+        const p = it?.parada;
+        if (!m || !p) continue;
+
+        // ✅ solo paradas reales (no "referencial")
+        const denom = String(p?.denominacion || "").toLowerCase().trim();
+        if (denom === "referencial") continue;
+
+        const llObj = m.getLatLng?.();
+        if (!llObj) continue;
+
+        const d = map.distance(userLoc, llObj);
+        if (d < bestD) {
+          bestD = d;
+          bestMarker = m;
+          bestLL = [llObj.lat, llObj.lng];
+        }
+      }
+
+      if (bestMarker && bestLL) {
+        // 🟢 pintar marcador verde
+        bestMarker.setStyle({
+          color: "#2e7d32",
+          fillColor: "#2e7d32",
+          fillOpacity: 1,
+          weight: 4
+        });
+        if (bestMarker.setRadius) bestMarker.setRadius(9);
+        bestMarker.bindTooltip("🟢 Parada más cercana", { direction: "top", sticky: true });
+
+        // ➖➖➖ dibujar ruta punteada usuario → parada más cercana
+        const accessLayer = L.layerGroup().addTo(map);
+        setAccessLayer(accessLayer);
+
+        // Esta función ya dibuja “dashed” (entrecortado) siguiendo OSRM
+        await drawDashedAccessRoute(userLoc, bestLL, "#2e7d32");
+      }
+    }
+  } catch {}
 
   if (coords.length < 2) return;
 
@@ -1064,17 +1117,43 @@ async function _planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {
   if (!ctx?.preserveLayers) clearTransportLayers();
 
   const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
-  const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
+const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
 
-  const lineas = await getLineasByTipo("rural", {
-    ...ctx,
-    ignoreGeoFilter: ctx?.ignoreGeoFilter === true || ctx?.specialSevilla === true
-  });
+const lineasAll = await getLineasByTipo("rural", {
+  ...ctx,
+  ignoreGeoFilter: ctx?.ignoreGeoFilter === true || ctx?.specialSevilla === true
+});
 
-  if (!lineas?.length) {
-    if (ui?.infoEl && !ctx?.dryRun) ui.infoEl.innerHTML = "❌ No hay líneas rurales disponibles.";
-    return null;
+if (!lineasAll?.length) {
+  if (ui?.infoEl && !ctx?.dryRun) ui.infoEl.innerHTML = "❌ No hay líneas rurales disponibles.";
+  return null;
+}
+
+// ✅ NUEVO: si estamos en modo bus automático, preferir solo líneas operativas ahora
+// (si no hay ninguna operativa, hacemos fallback para no dejar al usuario sin ruta)
+let lineas = [...lineasAll];
+
+const requireOpNow = (ctx?.requireOperatingNow !== false); // default: true
+if (requireOpNow) {
+  const operativas = lineasAll.filter(l => l?.activo && isLineOperatingNow(l, now));
+
+  if (operativas.length) {
+    lineas = operativas;
+  } else {
+    // fallback: no hay ninguna operativa ahora, usamos todas
+    lineas = [...lineasAll];
+
+    // opcional: aviso
+    if (ui?.infoEl && !ctx?.dryRun) {
+      ui.infoEl.innerHTML = `
+        <div class="alert alert-warning py-2 mb-2">
+          ⚠️ No hay líneas rurales marcadas como <b>operativas ahora</b>.
+          Se mostrará la mejor ruta registrada (puede no estar disponible en este momento).
+        </div>
+      `;
+    }
   }
+}
 
   let routesGroup = null;
   let layerStops = null;
@@ -1398,13 +1477,53 @@ async function _planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, ui = {
         ? `<div class="alert alert-warning py-2 mt-2 mb-0">⚠️ Se encontró ruta pero requiere caminata grande.</div>`
         : ""}
 
-      <div class="small mt-2 text-muted">
-        * “Referencial” se dibuja como puntito sin popup, pero sí cuenta para la ruta.
-        “Fin de ruta” se corta por finderuta (última marcada).
-      </div>
+      
     `;
   }
 
   map.fitBounds(L.latLngBounds([userLoc, destLoc, best.boardLL, best.alightLL]).pad(0.2));
   return { tipo: "rural", linea: best.linea, sentido: titleCase(normStr(best.sentido)), useAuto: best.useAuto, score: best.score };
+}
+function highlightNearestStopOnLine(stopMarkers, userLoc) {
+  if (!userLoc || !Array.isArray(stopMarkers) || !stopMarkers.length) return;
+
+  let best = null;
+  let bestD = Infinity;
+
+  for (const it of stopMarkers) {
+    const m = it?.marker;
+    const p = it?.parada;
+
+    // ✅ solo "paradas" reales (evita "referencial")
+    const denom = String(p?.denominacion || "").toLowerCase().trim();
+    if (denom === "referencial") continue;
+
+    if (!m) continue;
+    const ll = m.getLatLng?.();
+    if (!ll) continue;
+
+    const d = map.distance(userLoc, ll);
+    if (d < bestD) {
+      bestD = d;
+      best = m;
+    }
+  }
+
+  if (!best) return;
+
+  // ✅ ponerlo verde (sin cambiar lógica del planner)
+  try {
+    best.setStyle({
+      color: "#2e7d32",
+      fillColor: "#2e7d32",
+      fillOpacity: 1,
+      weight: 4
+    });
+
+    // opcional: un poco más grande
+    if (best.setRadius) best.setRadius(9);
+
+    // opcional: tooltip al pasar el mouse
+    best.bindTooltip("🟢 Parada más cercana", { direction: "top", sticky: true });
+  } catch {}
 }

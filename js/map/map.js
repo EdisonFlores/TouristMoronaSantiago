@@ -30,6 +30,26 @@ let markerSelected = null;
 
 let transportLines = [];
 
+/* ================= POPUP HELPERS ================= */
+/**
+ * ✅ Si hay popupHTML (eventos), lo usamos.
+ * ✅ Si no, usamos formato estándar (lugares).
+ */
+function buildPopupHTML(p) {
+  if (!p) return `<b>Lugar</b>`;
+  if (p.popupHTML && String(p.popupHTML).trim()) return String(p.popupHTML);
+
+  const nombre = p.nombre || "Lugar";
+  const tel = p.telefono || "N/D";
+  const horario = p.horario || "N/D";
+
+  return `
+    <b>${nombre}</b><br>
+    📞 ${tel}<br>
+    🕒 ${horario}
+  `;
+}
+
 /* ================= LIMPIEZA ================= */
 export function clearMarkers() {
   markersLayer.clearLayers();
@@ -67,17 +87,13 @@ export function renderMarkers(list, onSelect) {
   clearMarkers();
 
   list.forEach(p => {
-    if (!p.ubicacion?.latitude || !p.ubicacion?.longitude) return;
+    if (!p?.ubicacion?.latitude || !p?.ubicacion?.longitude) return;
 
     const { latitude, longitude } = p.ubicacion;
 
     L.marker([latitude, longitude])
       .addTo(markersLayer)
-      .bindPopup(`
-        <b>${p.nombre}</b><br>
-        📞 ${p.telefono || "N/D"}<br>
-        🕒 ${p.horario || "N/D"}
-      `)
+      .bindPopup(buildPopupHTML(p))
       .on("click", () => onSelect(p));
   });
 }
@@ -92,9 +108,7 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
 
   markerSelected = L.marker([latitude, longitude])
     .addTo(routeOverlay)
-    .bindPopup(
-      `<b>${place.nombre}</b><br>📞 ${place.telefono || "-"}<br>⏰ ${place.horario || "-"}`
-    )
+    .bindPopup(buildPopupHTML(place))
     .openPopup();
 
   const profile = {

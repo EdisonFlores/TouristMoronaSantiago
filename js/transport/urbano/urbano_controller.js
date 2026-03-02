@@ -490,9 +490,12 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
     clearTransportLayers();
   }
 
+  const now = (ctx?.now instanceof Date) ? ctx.now : new Date();
   const destLoc = [destPlace.ubicacion.latitude, destPlace.ubicacion.longitude];
 
-  let lineas = await getLineasByTipo("urbano", ctx);
+  // ====== 1) Cargar líneas urbanas ======
+  let lineasAll = await getLineasByTipo("urbano", ctx);
+  lineasAll = Array.isArray(lineasAll) ? lineasAll : [];
 
   // ✅ Proaño / Río Blanco => SOLO Línea 5
   const isProanoOrRioBlanco = () => {
@@ -510,9 +513,40 @@ export async function planAndShowBusStopsForPlace(userLoc, destPlace, ctx = {}, 
   };
 
   if (isProanoOrRioBlanco()) {
-    lineas = (Array.isArray(lineas) ? lineas : []).filter(l => normStr(l?.codigo) === "l5");
+    lineasAll = lineasAll.filter(l => normStr(l?.codigo) === "l5");
   }
 
+  if (!lineasAll.length) {
+    if (ui?.infoEl && !ctx?.dryRun) ui.infoEl.innerHTML = "❌ No hay líneas urbanas disponibles.";
+    return null;
+  }
+
+  // ====== 2) ✅ NUEVO: Filtrar por líneas operativas ahora ======
+  const requireOpNow = (ctx?.requireOperatingNow !== false); // default true
+  let lineas = [...lineasAll];
+
+  if (requireOpNow) {
+    const operativas = lineasAll.filter(l => l?.activo && isLineOperatingNow(l, now));
+
+    if (operativas.length) {
+      lineas = operativas;
+    } else {
+      // fallback: no hay operativas ahora => usamos todas (para no quedarnos sin ruta)
+      lineas = [...lineasAll];
+
+      // opcional: aviso (solo si NO es dryRun)
+      if (ui?.infoEl && !ctx?.dryRun) {
+        ui.infoEl.innerHTML = `
+          <div class="alert alert-warning py-2 mb-2">
+            ⚠️ No hay líneas urbanas marcadas como <b>operativas ahora</b>.
+            Se calculará la mejor ruta registrada (puede no estar disponible en este momento).
+          </div>
+        `;
+      }
+    }
+  }
+
+  // ====== 3) Tu lógica original de scoring ======
   const BOARD_STEPS = [25, 100, 150, 250, 350, 450, 550, 650, 800, 1000, 1200, 1300];
   const DEST_STEPS  = [100, 150, 250, 350, 450, 550, 650];
   const LEVELS = Math.max(BOARD_STEPS.length, DEST_STEPS.length);

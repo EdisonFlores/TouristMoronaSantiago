@@ -17,7 +17,8 @@ import {
 import {
   cargarLineasTransporte,
   clearTransportLayers,
-  planAndShowBusStops
+  planAndShowBusStops,
+  hasBusCoverage
 } from "./transport/transport_controller.js";
 
 import { getLineasByTipoAll, isLineOperatingNow } from "./transport/core/transport_data.js";
@@ -28,7 +29,6 @@ import { installMapContextMenu } from "./map/context_menu.js";
 import { initLayersUI } from "./map/layers_ui.js";
 import { shouldShowVisitMorona, applyVisitMorona } from "./app/virtual_visit.js";
 
-// ✅ IMPORT actualizado: incluye detectPointContext
 import { detectAdminContextFromLatLng, detectPointContext } from "./app/admin_detection.js";
 import { createManualRouting } from "./app/manual_route.js";
 
@@ -46,14 +46,22 @@ let ctxGeo = {
   canton: "",
   parroquia: "",
   specialSevilla: false,
-  entornoUser: ""
+  entornoUser: "",
+  busEnabled: true,       // ✅ NUEVO
+  virtualMorona: false    // ✅ NUEVO
 };
 
 const getCtxGeo = () => ctxGeo;
 
+// ✅ Flag interno para “visita/virtual”
+let forceVirtualMoronaNext = false;
+
 /* ================= ELEMENTOS DEL DOM ================= */
 const category = document.getElementById("category");
 const extra = document.getElementById("extra-controls");
+
+// ✅ Banner fijo (NO lo pisa manual_route)
+const bannerWrap = document.getElementById("loc-banner-wrap");
 
 /* ================= HELPERS UI ================= */
 function clearRouteInfo() {
@@ -74,7 +82,7 @@ function resetMap() {
   manual.clearManualStart();
 }
 
-// ✅ NUEVO: Volver al modo normal (limpia indicaciones manuales)
+// ✅ volver al modo normal (limpia indicaciones manuales)
 function clearDirections() {
   manual.clearManualDest();
   manual.clearManualStart();
@@ -88,6 +96,9 @@ function clearDirections() {
   if (loc) map.setView(loc, 14);
 
   refreshLayersOverlays();
+
+  // ✅ el banner debe volver a aparecer al quitar indicaciones
+  showDetectedFacade();
 }
 
 /* ================= MODAL GENERAL ================= */
@@ -150,8 +161,8 @@ function refreshLayersOverlays() {
 
 /* ================= UI banner ubicación ================= */
 function showLocatingBanner() {
-  if (!extra) return;
-  extra.innerHTML = `
+  if (!bannerWrap) return;
+  bannerWrap.innerHTML = `
     <div id="loc-banner" class="alert alert-info py-2 mb-2">
       📡 <b>Estamos ubicándote…</b><br>
       <small>Esto puede tardar unos segundos.</small>
@@ -167,10 +178,13 @@ function enableCategoryUI() {
 }
 
 function showDetectedFacade() {
-  if (!extra) return;
+  if (!bannerWrap) return;
 
-  const banner = document.getElementById("loc-banner");
-  if (!banner) return;
+  let banner = bannerWrap.querySelector("#loc-banner");
+  if (!banner) {
+    bannerWrap.innerHTML = `<div id="loc-banner" class="alert alert-info py-2 mb-2"></div>`;
+    banner = bannerWrap.querySelector("#loc-banner");
+  }
 
   const p = String(detectedAdmin?.provincia || "").trim();
   const c = String(detectedAdmin?.canton || "").trim();
@@ -191,8 +205,10 @@ function showDetectedFacade() {
     if (!btn) return;
 
     btn.onclick = async () => {
+      forceVirtualMoronaNext = true;
+
       applyVisitMorona({
-        setUserLocation: updateUserLocation, // ✅ via actions
+        setUserLocation: updateUserLocation,
         map,
         onAfterSet: async (loc) => {
           setUserMarker(loc, true);
@@ -203,6 +219,8 @@ function showDetectedFacade() {
 
           // entorno fijo al visitar Morona
           ctxGeo.entornoUser = "urbano";
+          ctxGeo.virtualMorona = true;
+          ctxGeo.busEnabled = true;
 
           showDetectedFacade();
           enableCategoryUI();
@@ -212,6 +230,7 @@ function showDetectedFacade() {
     };
   };
 
+  // ✅ SIN COBERTURA (no prov/cant)
   if (!p || !c) {
     banner.className = "alert alert-info py-2 mb-2";
     banner.innerHTML = `
@@ -231,6 +250,7 @@ function showDetectedFacade() {
     return;
   }
 
+  // ✅ CON COBERTURA (prov/cant detectados)
   banner.className = "alert alert-success py-2 mb-2";
   banner.innerHTML = `
     ✅ <b>Usted se encuentra en:</b><br>
@@ -255,6 +275,38 @@ function showDetectedFacade() {
   }
 }
 
+/**
+ * ✅ Cuando se selecciona un lugar:
+ * Oculta SOLO el banner verde de ubicación (“Usted se encuentra en...”)
+ */
+function hideDetectedFacadeOnPlaceSelection() {
+  if (!bannerWrap) return;
+
+  const banner = bannerWrap.querySelector("#loc-banner");
+  if (!banner) return;
+
+  const isSuccessBanner = banner.classList.contains("alert-success");
+  if (!isSuccessBanner) return;
+
+  bannerWrap.innerHTML = "";
+}
+
+/**
+ * ✅ Cuando se selecciona una CATEGORÍA (primer select),
+ * ocultar el banner verde “Usted se encuentra en...”
+ */
+function hideDetectedFacadeOnCategoryChange() {
+  if (!bannerWrap) return;
+
+  const banner = bannerWrap.querySelector("#loc-banner");
+  if (!banner) return;
+
+  // Solo ocultamos el banner verde (no el de “Sin cobertura”)
+  if (banner.classList.contains("alert-success")) {
+    bannerWrap.innerHTML = "";
+  }
+}
+
 /* ================= Manual routing module ================= */
 const manual = createManualRouting({
   map,
@@ -262,11 +314,9 @@ const manual = createManualRouting({
 
   getUserLoc: () => getUserLocation(),
 
-  // ✅ place centralizado
   getActivePlace: () => activePlace,
   setActivePlace: (p) => { activePlace = p; setActivePlaceAction(p); },
 
-  // ✅ modo REAL desde state.js
   getMode: () => getMode(),
   setMode: (m) => setTravelMode(m),
 
@@ -281,7 +331,6 @@ const manual = createManualRouting({
   refreshLayersOverlays,
   clearRouteInfo,
 
-  // ✅ detectar contexto prov/cant/parr + entorno para puntos manuales
   detectPointContext
 });
 
@@ -310,7 +359,6 @@ function initMapControls() {
     onDirectionsFromHere: (latlng) => manual.setManualStartPoint(latlng),
     onDirectionsToHere: (latlng) => manual.setManualDestination(latlng),
 
-    // ✅ limpiar indicaciones (volver al modo normal)
     onClearDirections: () => clearDirections(),
 
     onCenterHere: (latlng) => map.setView(latlng, map.getZoom())
@@ -334,10 +382,30 @@ async function afterLocate(loc) {
   detectedAdmin = res.detectedAdmin;
   ctxGeo = res.ctxGeo;
 
+  // ✅ si venimos de “Explorar Morona”, forzamos
+  if (forceVirtualMoronaNext) {
+    forceVirtualMoronaNext = false;
+    ctxGeo.virtualMorona = true;
+    ctxGeo.busEnabled = true;
+    ctxGeo.entornoUser = "urbano";
+  } else {
+    ctxGeo.virtualMorona = false;
+
+    // ✅ calcular disponibilidad real de bus en la zona
+    try {
+      const okBus = await hasBusCoverage({ map, userLoc: loc, destLoc: loc });
+      ctxGeo.busEnabled = !!okBus;
+    } catch {
+      ctxGeo.busEnabled = false;
+    }
+  }
+
   showDetectedFacade();
+
   if (String(detectedAdmin?.provincia || "").trim() && String(detectedAdmin?.canton || "").trim()) {
     enableCategoryUI();
   }
+
   refreshLayersOverlays();
 }
 
@@ -347,10 +415,10 @@ if (USE_TEST_LOCATION) {
   navigator.geolocation.getCurrentPosition(
     async pos => afterLocate([pos.coords.latitude, pos.coords.longitude]),
     () => {
-      const banner = document.getElementById("loc-banner");
-      if (banner) {
-        banner.className = "alert alert-info py-2 mb-2";
-        banner.innerHTML = `
+      // ✅ sin geolocalización: mostramos banner + botón “Visitar Morona”
+      if (!bannerWrap) return;
+      bannerWrap.innerHTML = `
+        <div id="loc-banner" class="alert alert-info py-2 mb-2">
           <b>📍 Sin cobertura por ahora</b><br>
           <div class="mt-1">De momento no hay datos registrados en la zona, pronto habrá cobertura.</div>
           <div class="mt-2 tm-visit-box">
@@ -359,23 +427,99 @@ if (USE_TEST_LOCATION) {
               🧭 Visitar Morona
             </button>
           </div>
-        `;
+        </div>
+      `;
 
-        const btn = document.getElementById("btn-visit-morona");
-        if (btn) {
-          btn.onclick = async () => {
-            applyVisitMorona({
-              setUserLocation: updateUserLocation,
-              map,
-              onAfterSet: async (loc2) => {
-                await afterLocate(loc2);
-              }
-            });
-          };
-        }
+      const btn = document.getElementById("btn-visit-morona");
+      if (btn) {
+        btn.onclick = async () => {
+          forceVirtualMoronaNext = true;
+          applyVisitMorona({
+            setUserLocation: updateUserLocation,
+            map,
+            onAfterSet: async (loc2) => {
+              await afterLocate(loc2);
+            }
+          });
+        };
       }
     }
   );
+}
+
+/* ================= EVENTOS: helpers ================= */
+function parseDDMMYYYY(s) {
+  const m = String(s || "").trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return null;
+  const dd = Number(m[1]);
+  const mm = Number(m[2]);
+  const yy = Number(m[3]);
+  if (!Number.isFinite(dd) || !Number.isFinite(mm) || !Number.isFinite(yy)) return null;
+  return new Date(yy, mm - 1, dd, 0, 0, 0, 0);
+}
+
+function startOfToday() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function isFutureEvent(ev) {
+  // ✅ futuro = fecha_fin >= hoy (si no hay fecha_fin, usa fecha_inicio)
+  const fi = parseDDMMYYYY(ev?.fecha_inicio);
+  const ff = parseDDMMYYYY(ev?.fecha_fin);
+  const end = ff || fi;
+  if (!end) return false;
+  return end.getTime() >= startOfToday().getTime();
+}
+
+function eventToPlace(ev) {
+  // Adaptador para que drawRoute / planAndShowBusStops funcionen igual
+  return {
+    ...ev,
+    nombre: ev?.nombre || "Evento",
+    telefono: ev?.organizador ? `Organizador: ${ev.organizador}` : "No disponible",
+    horario: `${ev?.fecha_inicio || ""} ${ev?.hora_inicio || ""} → ${ev?.fecha_fin || ""} ${ev?.hora_fin || ""}`.trim(),
+    ubicacion: ev?.ubicacion
+  };
+}
+
+function buildEventPopupHTML(ev) {
+  const nombre = ev?.nombre || "Evento";
+  const org = ev?.organizador || "No disponible";
+  const ent = ev?.entrada || "No disponible";
+  const fi = ev?.fecha_inicio || "N/D";
+  const ff = ev?.fecha_fin || "N/D";
+  const hi = ev?.hora_inicio || "N/D";
+  const hf = ev?.hora_fin || "N/D";
+
+  return `
+    <b>📅 ${nombre}</b><br>
+    👤 ${org}<br>
+    🎟️ ${ent}<br>
+    🗓️ ${fi} ${hi} → ${ff} ${hf}
+  `;
+}
+
+function renderEventMarkers(list, onSelect) {
+  clearMarkers();
+
+  (Array.isArray(list) ? list : []).forEach(ev => {
+    const u = ev?.ubicacion;
+    const lat = u?.latitude;
+    const lon = u?.longitude;
+    if (typeof lat !== "number" || typeof lon !== "number") return;
+
+    const marker = L.marker([lat, lon]).addTo(markersLayer);
+
+    marker.bindPopup(buildEventPopupHTML(ev));
+
+    // ✅ popup por hover (como pediste)
+    marker.on("mouseover", () => marker.openPopup());
+    marker.on("mouseout", () => marker.closePopup());
+
+    marker.on("click", () => onSelect(ev));
+  });
 }
 
 /* ================= EVENTO CATEGORÍA ================= */
@@ -383,11 +527,214 @@ category.onchange = async () => {
   resetMap();
   dataList.length = 0;
 
-  if (!category.value) return;
+  // ✅ si el usuario vuelve a "Seleccione categoría", mostramos el banner otra vez
+  if (!category.value) {
+    showDetectedFacade();
+    return;
+  }
+
+  // ✅ al elegir una categoría, ocultar banner verde "Usted se encuentra en..."
+  hideDetectedFacadeOnCategoryChange();
 
   console.log("📍 Fachada:", detectedAdmin);
   console.log("🧠 ctxGeo (lógico):", ctxGeo);
 
+  /* =====================================================
+     ✅ EVENTOS (colección eventosms)
+     - NO rompe nada de "lugar"
+  ===================================================== */
+  if (category.value === "eventos" || category.value === "eventosms") {
+    const provSel = String(ctxGeo.provincia || "");
+    const cantonSel = String(ctxGeo.canton || "");
+    const parroquiaSel = String(ctxGeo.parroquia || "");
+
+    const eventos = await getCollectionCache("eventosms");
+    const arr = Array.isArray(eventos) ? eventos : [];
+
+    // Filtro geo + futuros
+    let filtered = arr.filter(ev => {
+      if (!ev?.ubicacion) return false;
+
+      if (String(ev.provincia || "") !== provSel) return false;
+
+      // cantón
+      if (ctxGeo.specialSevilla) {
+        const c = String(ev.canton || ev.ciudad || "");
+        if (c !== "Sevilla Don Bosco" && c !== "Morona") return false;
+      } else {
+        const c = String(ev.canton || ev.ciudad || "");
+        if (c !== cantonSel) return false;
+      }
+
+      // parroquia: si el usuario tiene parroquia detectada, priorizamos coincidencia
+      if (parroquiaSel && String(ev.parroquia || "") !== parroquiaSel) {
+        // no lo bloqueamos totalmente, solo lo dejamos pasar si quieres:
+        // return false;
+        // ✅ mejor: lo dejamos pasar pero luego ordenamos por parroquia
+      }
+
+      // futuro
+      if (!isFutureEvent(ev)) return false;
+
+      return true;
+    });
+
+    if (!filtered.length) {
+      showModal(
+        "📅 Sin eventos futuros",
+        `
+          <div class="alert alert-info py-2 mb-2">
+            No hay <b>eventos futuros</b> registrados en esta zona.
+          </div>
+          <div class="small">
+            Revisa que tus documentos tengan <b>fecha_inicio/fecha_fin</b> en formato <b>DD/MM/YYYY</b>.
+          </div>
+        `
+      );
+      extra.innerHTML = "";
+      return;
+    }
+
+    // Orden: primero misma parroquia si existe, luego por fecha_inicio y nombre
+    filtered.sort((a, b) => {
+      const ap = String(a.parroquia || "");
+      const bp = String(b.parroquia || "");
+      if (parroquiaSel) {
+        const ak = (ap === parroquiaSel) ? 0 : 1;
+        const bk = (bp === parroquiaSel) ? 0 : 1;
+        if (ak !== bk) return ak - bk;
+      }
+
+      const afi = parseDDMMYYYY(a.fecha_inicio)?.getTime() ?? Infinity;
+      const bfi = parseDDMMYYYY(b.fecha_inicio)?.getTime() ?? Infinity;
+      if (afi !== bfi) return afi - bfi;
+
+      return String(a.nombre || "").localeCompare(String(b.nombre || ""));
+    });
+
+    // Adaptamos para que el resto del flujo (rutas) funcione igual
+    const places = filtered.map(eventToPlace);
+    dataList.push(...places);
+
+    const busBtnHTML = (ctxGeo.busEnabled === true)
+      ? `<button class="btn btn-outline-primary" data-mode="bus">🚌</button>`
+      : "";
+
+    extra.innerHTML = `
+      <select id="lugares" class="form-select mb-2">
+        <option value="">📅 Seleccione evento</option>
+      </select>
+
+      <button id="near" class="btn btn-primary w-100 mb-2">
+        📏 Evento más cercano
+      </button>
+
+      <div class="btn-group w-100 mb-2">
+        <button class="btn btn-outline-primary" data-mode="walking">🚶</button>
+        <button class="btn btn-outline-primary" data-mode="bicycle">🚴</button>
+        <button class="btn btn-outline-primary" data-mode="motorcycle">🏍️</button>
+        <button class="btn btn-outline-primary" data-mode="driving">🚗</button>
+        ${busBtnHTML}
+      </div>
+
+      <div id="route-info" class="small"></div>
+    `;
+
+    const sel = document.getElementById("lugares");
+    dataList.forEach((ev, i) => {
+      const when = `${ev?.fecha_inicio || ""} ${ev?.hora_inicio || ""}`.trim();
+      const par = ev?.parroquia ? `(${ev.parroquia})` : "";
+      sel.innerHTML += `<option value="${i}">${ev.nombre || "Evento"} ${par} ${when ? `- ${when}` : ""}</option>`;
+    });
+
+    // Marcadores con popup por hover
+    renderEventMarkers(dataList, (ev) => {
+      clearRoute();
+      clearTransportLayers();
+      clearRouteInfo();
+
+      manual.clearManualDest();
+      manual.clearManualStart();
+
+      activePlace = ev;
+      setActivePlaceAction(activePlace);
+
+      hideDetectedFacadeOnPlaceSelection();
+
+      manual.buildRoute();
+      refreshLayersOverlays();
+    });
+
+    sel.onchange = () => {
+      clearRoute();
+      clearTransportLayers();
+      clearRouteInfo();
+
+      manual.clearManualDest();
+      manual.clearManualStart();
+
+      activePlace = dataList[sel.value];
+      setActivePlaceAction(activePlace);
+
+      if (!activePlace) return;
+
+      hideDetectedFacadeOnPlaceSelection();
+
+      manual.buildRoute();
+      refreshLayersOverlays();
+    };
+
+    document.getElementById("near").onclick = () => {
+      clearRoute();
+      clearTransportLayers();
+      clearRouteInfo();
+
+      manual.clearManualDest();
+      manual.clearManualStart();
+
+      activePlace = findNearest(dataList);
+      setActivePlaceAction(activePlace);
+
+      if (!activePlace) return;
+
+      hideDetectedFacadeOnPlaceSelection();
+
+      manual.buildRoute();
+      refreshLayersOverlays();
+    };
+
+    document.querySelectorAll("[data-mode]").forEach(btn => {
+      btn.onclick = () => {
+        const m = btn.dataset.mode;
+
+        if (m === "bus" && ctxGeo.busEnabled !== true) {
+          showModal(
+            "🚌 Transporte no disponible",
+            `
+              <div class="alert alert-info py-2 mb-0">
+                En esta zona no hay datos registrados para transporte en bus.
+                Puedes usar otros modos o presionar <b>Explorar Morona</b>.
+              </div>
+            `
+          );
+          setTravelMode("walking");
+          manual.buildRoute();
+          refreshLayersOverlays();
+          return;
+        }
+
+        setTravelMode(m);
+        manual.buildRoute();
+        refreshLayersOverlays();
+      };
+    });
+
+    return; // ✅ importante: no seguir al flujo genérico de "lugar"
+  }
+
+  /* =====================================================
+     TRANSPORTE LINEAS (ya existente)
+  ===================================================== */
   if (category.value === "transporte_lineas") {
     extra.innerHTML = `
       <select id="tipo" class="form-select mb-2">
@@ -451,6 +798,10 @@ category.onchange = async () => {
 
     return;
   }
+
+  /* =====================================================
+     FLUJO GENÉRICO (colección lugar) - ya existente
+  ===================================================== */
 
   // ===== LUGARES POR CATEGORÍA =====
   const lugares = await getCollectionCache("lugar");
@@ -523,6 +874,11 @@ category.onchange = async () => {
 
   dataList.push(...all);
 
+  // ✅ Botón bus solo si hay cobertura (o si se activó virtual Morona)
+  const busBtnHTML = (ctxGeo.busEnabled === true)
+    ? `<button class="btn btn-outline-primary" data-mode="bus">🚌</button>`
+    : "";
+
   extra.innerHTML = `
     <select id="lugares" class="form-select mb-2">
       <option value="">📍 Seleccione lugar</option>
@@ -537,7 +893,7 @@ category.onchange = async () => {
       <button class="btn btn-outline-primary" data-mode="bicycle">🚴</button>
       <button class="btn btn-outline-primary" data-mode="motorcycle">🏍️</button>
       <button class="btn btn-outline-primary" data-mode="driving">🚗</button>
-      <button class="btn btn-outline-primary" data-mode="bus">🚌</button>
+      ${busBtnHTML}
     </div>
 
     <div id="route-info" class="small"></div>
@@ -560,6 +916,8 @@ category.onchange = async () => {
     activePlace = place;
     setActivePlaceAction(place);
 
+    hideDetectedFacadeOnPlaceSelection();
+
     manual.buildRoute();
     refreshLayersOverlays();
   });
@@ -576,6 +934,9 @@ category.onchange = async () => {
     setActivePlaceAction(activePlace);
 
     if (!activePlace) return;
+
+    hideDetectedFacadeOnPlaceSelection();
+
     manual.buildRoute();
     refreshLayersOverlays();
   };
@@ -592,13 +953,35 @@ category.onchange = async () => {
     setActivePlaceAction(activePlace);
 
     if (!activePlace) return;
+
+    hideDetectedFacadeOnPlaceSelection();
+
     manual.buildRoute();
     refreshLayersOverlays();
   };
 
   document.querySelectorAll("[data-mode]").forEach(btn => {
     btn.onclick = () => {
-      setTravelMode(btn.dataset.mode);
+      const m = btn.dataset.mode;
+
+      // ✅ seguridad extra
+      if (m === "bus" && ctxGeo.busEnabled !== true) {
+        showModal(
+          "🚌 Transporte no disponible",
+          `
+            <div class="alert alert-info py-2 mb-0">
+              En esta zona no hay datos registrados para transporte en bus.
+              Puedes usar otros modos o presionar <b>Explorar Morona</b>.
+            </div>
+          `
+        );
+        setTravelMode("walking");
+        manual.buildRoute();
+        refreshLayersOverlays();
+        return;
+      }
+
+      setTravelMode(m);
       manual.buildRoute();
       refreshLayersOverlays();
     };

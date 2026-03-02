@@ -1,4 +1,3 @@
-// js/app/actions.js
 import { setActivePlace, getUserLocation, setMode, setUserLocation } from "./state.js";
 import { drawRoute, clearMarkers, renderMarkers, clearRoute } from "../map/map.js";
 import { clearTransportLayers, planAndShowBusStops } from "../transport/transport_controller.js";
@@ -24,6 +23,12 @@ export function selectPlace(place, infoBox, ctxGeo = {}) {
   clearMarkers();
   renderMarkers([place], () => {});
 
+  const busEnabled = (ctxGeo?.busEnabled !== false);
+
+  const busBtnHTML = busEnabled
+    ? `<button class="btn btn-outline-secondary" data-mode="bus">🚌</button>`
+    : "";
+
   infoBox.innerHTML = `
     <h6>${place.nombre}</h6>
     📞 ${place.telefono || "No disponible"}<br>
@@ -34,7 +39,7 @@ export function selectPlace(place, infoBox, ctxGeo = {}) {
       <button class="btn btn-outline-success" data-mode="bicycle">🚴</button>
       <button class="btn btn-outline-warning" data-mode="motorcycle">🏍️</button>
       <button class="btn btn-outline-danger" data-mode="driving">🚗</button>
-      <button class="btn btn-outline-secondary" data-mode="bus">🚌</button>
+      ${busBtnHTML}
     </div>
 
     <div id="route-info" class="small mt-1"></div>
@@ -43,6 +48,21 @@ export function selectPlace(place, infoBox, ctxGeo = {}) {
   infoBox.querySelectorAll("button[data-mode]").forEach(btn => {
     btn.onclick = async () => {
       const mode = btn.dataset.mode;
+
+      // ✅ si no hay bus, no debería existir el botón, pero por seguridad:
+      if (mode === "bus" && !busEnabled) {
+        const infoEl = document.getElementById("route-info");
+        if (infoEl) {
+          infoEl.innerHTML = `
+            <div class="alert alert-info py-2 mb-0">
+              En esta zona no hay datos registrados para transporte en bus.
+            </div>
+          `;
+        }
+        setMode("walking");
+        return;
+      }
+
       setMode(mode);
 
       const infoEl = document.getElementById("route-info");
