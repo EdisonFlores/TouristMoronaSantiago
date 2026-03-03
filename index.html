@@ -36,8 +36,31 @@
   <nav class="navbar navbar-expand-lg navbar-dark container">
     <a class="navbar-brand d-flex align-items-center gap-2" href="#">
       <i class="bi bi-signpost-2-fill"></i>
-      TouristMacas
+      <span data-i18n="app.name">TouristMacas</span>
     </a>
+
+    <!-- ✅ DERECHA: Clima + Idioma + Dark mode -->
+    <div class="ms-auto d-flex align-items-center gap-2 tm-header-right">
+
+      <!-- 1) CLIMA -->
+      <div id="weatherBadge" class="tm-weather" aria-live="polite" title="Clima">
+        <i class="bi bi-cloud-sun"></i>
+        <span id="weatherTemp">--°C</span>
+      </div>
+
+      <!-- 2) TRADUCCIÓN ES/EN -->
+      <button id="btnLang" type="button" class="btn btn-sm tm-chip" aria-label="Cambiar idioma">
+        <span id="langES" class="tm-lang active">ES</span>
+        <span class="tm-lang-sep">/</span>
+        <span id="langEN" class="tm-lang">EN</span>
+      </button>
+
+      <!-- 3) MODO OSCURO 🌙/☀ -->
+      <button id="btnTheme" type="button" class="btn btn-sm tm-chip" aria-label="Cambiar tema">
+        <i id="themeIcon" class="bi bi-moon-stars-fill"></i>
+      </button>
+
+    </div>
   </nav>
 </header>
 
@@ -89,12 +112,12 @@
             <option value="naturaleza">🏞️ Naturaleza</option>
           </optgroup>
 
-     <optgroup label="🎶 Ocio">
-  <option value="eventosms">📅 Eventos</option> <!-- ✅ NUEVO -->
-  <option value="discotecas">🕺 Discotecas</option>
-  <option value="centros_recreativos">🎯 Centros recreativos</option>
-  <option value="canchas">⚽ Canchas</option>
-</optgroup>
+          <optgroup label="🎶 Ocio">
+            <option value="eventosms">📅 Eventos</option>
+            <option value="discotecas">🕺 Discotecas</option>
+            <option value="centros_recreativos">🎯 Centros recreativos</option>
+            <option value="canchas">⚽ Canchas</option>
+          </optgroup>
 
           <optgroup label="🧑‍⚕️ Servicios">
             <option value="belleza">💄 Belleza</option>
@@ -133,7 +156,7 @@
           </optgroup>
         </select>
 
-        <!-- ✅ NUEVO: contenedor fijo del banner (no lo pisa manual_route) -->
+        <!-- ✅ contenedor fijo del banner -->
         <div id="loc-banner-wrap" class="mt-2"></div>
 
         <div id="extra-controls" class="mt-3"></div>

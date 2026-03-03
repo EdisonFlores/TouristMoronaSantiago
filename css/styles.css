@@ -1,4 +1,4 @@
-html, body {
+html, body { 
   height: 100%;
   margin: 0;
 }
@@ -93,6 +93,7 @@ body {
   from { transform: translateY(0); }
   to   { transform: translateY(-10px); }
 }
+
 /* =========================
    CONTEXT MENU (tipo OSM)
 ========================= */
@@ -164,4 +165,112 @@ body {
 }
 [data-theme="dark"] .tm-visit-box{
   border: 1px dashed rgba(255,255,255,0.25);
+}
+
+/* =========================
+   HEADER RIGHT (clima / idioma / tema)
+========================= */
+.tm-header-right{
+  color: #fff;
+}
+
+.tm-weather{
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.16);
+  border: 1px solid rgba(255,255,255,0.22);
+  font-weight: 600;
+  font-size: 0.9rem;
+  user-select: none;
+}
+
+.tm-chip{
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.16);
+  border: 1px solid rgba(255,255,255,0.22);
+  color: #fff;
+}
+
+.tm-chip:hover{
+  background: rgba(255,255,255,0.22);
+}
+
+.tm-chip:focus{
+  box-shadow: 0 0 0 0.2rem rgba(255,255,255,0.22);
+}
+
+.tm-lang{
+  opacity: 0.65;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.tm-lang.active{
+  opacity: 1;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tm-lang-sep{
+  opacity: 0.6;
+}
+
+/* =========================
+   WEATHER (modal) UI
+========================= */
+
+/* icono un poco más grande */
+.tm-wicon .bi { font-size: 1.1rem; }
+
+/* quitar bordes/lineas en filas */
+.tm-forecast-row{
+  border: none !important;
+}
+
+/* fondo nocturno con gradiente suave */
+.tm-forecast-row.tm-night{
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--card) 88%, #0b2a4a 12%),
+    color-mix(in srgb, var(--card) 96%, #0b2a4a 4%)
+  );
+}
+
+/* temperatura con colores */
+.tm-forecast-temp.tm-temp-cold { color: #1e88e5; } /* azul frío */
+.tm-forecast-temp.tm-temp-mild { color: var(--text); opacity: 0.9; }
+.tm-forecast-temp.tm-temp-warm { color: #f57c00; } /* naranja */
+.tm-forecast-temp.tm-temp-hot  { color: #e53935; } /* rojo */
+.tm-forecast-temp.tm-temp-na   { color: var(--text); opacity: 0.6; }
+
+/* mini gráfico (sparkline) sin línea/borde */
+.tm-spark{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--card);
+  border: none !important;
+}
+
+.tm-spark-meta{
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.tm-sparkline{
+  width: 100%;
+  height: 46px;
+  color: var(--text);
+  opacity: 0.9;
 }
