@@ -1,3 +1,4 @@
+//js/app/theme.js
 const LS_THEME = "tm_theme";
 
 export function getTheme() {

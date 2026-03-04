@@ -1,7 +1,8 @@
+//js/script.js
 /* ================= IMPORTS ================= */
 import { findNearest, updateUserLocation, setTravelMode, setActivePlaceAction } from "./app/actions.js";
 import { dataList, getUserLocation, getMode } from "./app/state.js";
-;
+
 import {
   map,
   baseLayers,
@@ -35,7 +36,7 @@ import { createManualRouting } from "./app/manual_route.js";
 /* ✅ NUEVO: header controls / clima / tema / idioma */
 import { applyLanguageUI, toggleLanguage } from "./app/i18n.js";
 import { applyThemeUI, toggleTheme } from "./app/theme.js";
-import { updateWeatherBadge,startWeatherAutoRefresh  } from "./services/weather.js";
+import { updateWeatherBadge, startWeatherAutoRefresh } from "./services/weather.js";
 import { initWeatherPopup } from "./app/weather_popup.js";
 
 /* ================= ESTADO GLOBAL (UI) ================= */
@@ -79,11 +80,30 @@ const btnLang = document.getElementById("btnLang");
 if (btnTheme) btnTheme.addEventListener("click", () => toggleTheme());
 if (btnLang) btnLang.addEventListener("click", () => {
   toggleLanguage();
-  
 });
 
-/* ✅ Click en clima abre pronóstico */
-initWeatherPopup({ getUserLoc: () => getUserLocation() });
+/* ================= WEATHER HELPERS ================= */
+function getMapCenterLatLng() {
+  const c = map.getCenter?.();
+  if (!c) return null;
+  return { lat: c.lat, lng: c.lng };
+}
+
+async function refreshWeatherFromCenterOrUser() {
+  const c = getMapCenterLatLng();
+  if (c) {
+    await updateWeatherBadge(c.lat, c.lng);
+    return;
+  }
+  const loc = getUserLocation?.();
+  if (loc) await updateWeatherBadge(loc[0], loc[1]);
+}
+
+/* ✅ Click en clima abre pronóstico (prioridad: centro del mapa) */
+initWeatherPopup({
+  getUserLoc: () => getUserLocation(),
+  getMapCenter: () => map.getCenter()
+});
 
 /* ================= HELPERS UI ================= */
 function clearRouteInfo() {
@@ -247,6 +267,9 @@ function showDetectedFacade() {
           showDetectedFacade();
           enableCategoryUI();
           refreshLayersOverlays();
+
+          // ✅ clima desde centro (al visitar morona también)
+          await refreshWeatherFromCenterOrUser();
         }
       });
     };
@@ -385,13 +408,67 @@ function initMapControls() {
 
     onCenterHere: (latlng) => map.setView(latlng, map.getZoom())
   });
-  installMapContextMenu
 }
 
 /* ✅ EJECUCIÓN */
 showLocatingBanner();
 initMapControls();
 
+/* ================= WEATHER: update on map move ================= */
+let lastWeatherCenter = null;
+let weatherMoveTimer = null;
+
+// distancia en metros (haversine)
+function distanceMeters(a, b) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lng - a.lng);
+
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+function installWeatherOnMapMove() {
+  if (!map) return;
+
+  const handler = () => {
+    if (weatherMoveTimer) clearTimeout(weatherMoveTimer);
+
+    weatherMoveTimer = setTimeout(async () => {
+      const c = map.getCenter(); // Leaflet LatLng {lat,lng}
+      if (!c) return;
+
+      if (!lastWeatherCenter) {
+        lastWeatherCenter = { lat: c.lat, lng: c.lng };
+        await updateWeatherBadge(c.lat, c.lng);
+        return;
+      }
+
+      const moved = distanceMeters(lastWeatherCenter, { lat: c.lat, lng: c.lng });
+
+      // ✅ umbral: 300m (ajústalo si quieres)
+      if (moved < 300) return;
+
+      lastWeatherCenter = { lat: c.lat, lng: c.lng };
+      await updateWeatherBadge(c.lat, c.lng);
+    }, 900);
+  };
+
+  map.on("moveend", handler);
+  map.on("zoomend", handler);
+}
+
+// ✅ INSTALAR ACTUALIZACIÓN POR MOVIMIENTO (ANTES de ubicar, ya funciona igual)
+installWeatherOnMapMove();
+
+/* ================= GEOLOC ================= */
 const USE_TEST_LOCATION = false;
 const TEST_LOCATION = [-2.53699, -78.16339];
 
@@ -400,9 +477,6 @@ async function afterLocate(loc) {
 
   map.setView(loc, 14);
   setUserMarker(loc, true);
-
-  // ✅ clima (badge)
-  updateWeatherBadge(loc[0], loc[1]);
 
   const res = await detectAdminContextFromLatLng(loc);
   detectedAdmin = res.detectedAdmin;
@@ -433,9 +507,17 @@ async function afterLocate(loc) {
   }
 
   refreshLayersOverlays();
-  // 🔥 Actualizar badge y activar auto refresh
-updateWeatherBadge(loc[0], loc[1]);
-startWeatherAutoRefresh(() => getUserLocation(), 5);
+
+  // ✅ Clima: usar centro del mapa (no userLoc fijo)
+  await refreshWeatherFromCenterOrUser();
+
+  // ✅ Auto refresh (5 min) usando centro del mapa como prioridad
+  startWeatherAutoRefresh(() => {
+    const c = map.getCenter?.();
+    if (c && typeof c.lat === "number" && typeof c.lng === "number") return [c.lat, c.lng];
+    const u = getUserLocation?.();
+    return u || null;
+  }, 5);
 }
 
 if (USE_TEST_LOCATION) {
@@ -472,15 +554,17 @@ if (USE_TEST_LOCATION) {
           });
         };
       }
+
+      // ✅ aún sin geoloc, intenta clima por centro inicial del mapa
+      refreshWeatherFromCenterOrUser();
+      startWeatherAutoRefresh(() => {
+        const c = map.getCenter?.();
+        if (c && typeof c.lat === "number" && typeof c.lng === "number") return [c.lat, c.lng];
+        return null;
+      }, 5);
     }
   );
 }
-
-/* ✅ refresco clima cada 10 min */
-setInterval(() => {
-  const loc = getUserLocation();
-  if (loc) updateWeatherBadge(loc[0], loc[1]);
-}, 10 * 60 * 1000);
 
 /* ================= EVENTOS: helpers ================= */
 function parseDDMMYYYY(s) {
@@ -1017,53 +1101,3 @@ category.onchange = async () => {
     };
   });
 };
-// ================= WEATHER: update on map move =================
-let lastWeatherCenter = null;
-let weatherMoveTimer = null;
-
-// distancia en metros (haversine)
-function distanceMeters(a, b) {
-  const R = 6371000;
-  const toRad = (d) => (d * Math.PI) / 180;
-
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lng - a.lng);
-
-  const s =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-
-  return 2 * R * Math.asin(Math.sqrt(s));
-}
-
-function installWeatherOnMapMove() {
-  if (!map) return;
-
-  // cuando terminas de mover/zoom
-  map.on("moveend", () => {
-    // debounce 900ms
-    if (weatherMoveTimer) clearTimeout(weatherMoveTimer);
-
-    weatherMoveTimer = setTimeout(async () => {
-      const c = map.getCenter(); // Leaflet LatLng {lat,lng}
-
-      // si es primera vez, guarda y actualiza
-      if (!lastWeatherCenter) {
-        lastWeatherCenter = { lat: c.lat, lng: c.lng };
-        await updateWeatherBadge(c.lat, c.lng);
-        return;
-      }
-
-      // solo actualiza si se movió al menos X metros
-      const moved = distanceMeters(lastWeatherCenter, { lat: c.lat, lng: c.lng });
-
-      // ✅ umbral: 300m (ajústalo si quieres)
-      if (moved < 300) return;
-
-      lastWeatherCenter = { lat: c.lat, lng: c.lng };
-      await updateWeatherBadge(c.lat, c.lng);
-    }, 900);
-  });
-}

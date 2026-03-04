@@ -1,3 +1,4 @@
+//js/app/state.js
 // ================= ESTADO GLOBAL =================
 
 // lista de lugares filtrados
