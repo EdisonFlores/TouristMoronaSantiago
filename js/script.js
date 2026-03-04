@@ -2,7 +2,7 @@
 /* ================= IMPORTS ================= */
 import { findNearest, updateUserLocation, setTravelMode, setActivePlaceAction } from "./app/actions.js";
 import { dataList, getUserLocation, getMode } from "./app/state.js";
-
+import { translatePage } from "./app/translate.js";
 import {
   map,
   baseLayers,
@@ -78,10 +78,129 @@ const btnTheme = document.getElementById("btnTheme");
 const btnLang = document.getElementById("btnLang");
 
 if (btnTheme) btnTheme.addEventListener("click", () => toggleTheme());
-if (btnLang) btnLang.addEventListener("click", () => {
-  toggleLanguage();
-});
 
+function isMobileDevice() {
+  // 1) User-Agent (útil y rápido)
+  const ua = navigator.userAgent || "";
+  const uaMobile = /Android|iPhone|iPad|iPod|Mobile|IEMobile|Opera Mini/i.test(ua);
+
+  // 2) Fallback: touch + pantalla pequeña
+  const touch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0);
+  const small = window.matchMedia?.("(max-width: 768px)")?.matches;
+
+  return uaMobile || (touch && small);
+}
+
+function getBrowserLang() {
+  return (navigator.language || navigator.userLanguage || "es").toLowerCase();
+}
+
+function showTranslateHelpModal() {
+  const mobile = isMobileDevice();
+  const lang = getBrowserLang();
+
+  // ✅ Si empieza con "en" => inglés, caso contrario => español (fallback)
+  const isEnglish = lang.startsWith("en");
+
+  // ================= TEXTS (ES/EN) =================
+  const title = isEnglish ? "🌐 Browser translation" : "🌐 Traducción del navegador";
+
+  const subtitle = isEnglish
+    ? `Your browser language is <b>English</b> (${lang}).`
+    : `Tu navegador está en <b>español</b> (${lang}).`;
+
+  const infoText = isEnglish
+    ? `This web app does not translate by itself yet (it will in the future). For now, please use your browser translator. Thank you.`
+    : `Este app web de momento no traduce por sí misma (a futuro lo hará). Por ahora usa el traductor del navegador. Gracias.`;
+
+  const stepsDesktop = isEnglish
+    ? `
+      <div class="mt-2">
+        <b>On desktop (Chrome/Edge):</b><br>
+        1️⃣ Right click anywhere on the page<br>
+        2️⃣ Click <b>“Translate to English”</b> (or your language)<br>
+        <div class="small opacity-75 mt-1">
+          Tip: You can also open the browser menu ⋮ and look for <b>Translate…</b>
+        </div>
+      </div>
+    `
+    : `
+      <div class="mt-2">
+        <b>En computadora (Chrome/Edge):</b><br>
+        1️⃣ Click derecho en la página<br>
+        2️⃣ Selecciona <b>“Traducir al inglés”</b> (o el idioma)<br>
+        <div class="small opacity-75 mt-1">
+          Tip: también puedes abrir el menú ⋮ del navegador y buscar <b>Traducir…</b>
+        </div>
+      </div>
+    `;
+
+  const stepsMobile = isEnglish
+    ? `
+      <div class="mt-2">
+        <b>On Android (Chrome):</b><br>
+        1️⃣ Tap the menu <b>⋮</b> (top-right)<br>
+        2️⃣ Tap <b>“Translate…”</b><br>
+        3️⃣ Choose your language<br>
+
+        <hr class="my-2">
+
+        <b>On iPhone (Safari / Chrome):</b><br>
+        • Safari: tap <b>aA</b> (address bar) → <b>Translate</b><br>
+        • Chrome iOS: menu <b>⋯</b> → <b>Translate</b>
+        <div class="small opacity-75 mt-1">
+          *Some iPhones show the option only when the language is supported and you have internet.
+        </div>
+      </div>
+    `
+    : `
+      <div class="mt-2">
+        <b>En teléfono (Chrome Android):</b><br>
+        1️⃣ Toca el menú <b>⋮</b> (arriba a la derecha)<br>
+        2️⃣ Presiona <b>“Traducir…”</b><br>
+        3️⃣ Elige <b>Inglés</b> u otro idioma<br>
+
+        <hr class="my-2">
+
+        <b>En iPhone (Safari / Chrome):</b><br>
+        • Safari: toca <b>aA</b> (barra de direcciones) → <b>Traducir</b><br>
+        • Chrome iOS: menú <b>⋯</b> → <b>Translate</b> / <b>Traducir</b>
+        <div class="small opacity-75 mt-1">
+          *En algunos iPhone la opción aparece solo si el idioma está soportado y tienes internet.
+        </div>
+      </div>
+    `;
+
+  showModal(
+    title,
+    `
+      <div class="alert alert-info py-2 mb-2">
+        ${subtitle}<br>
+        ${infoText}
+      </div>
+      ${mobile ? stepsMobile : stepsDesktop}
+    `
+  );
+}
+
+/* ✅ Siempre disponible al click (ES/EN según navegador) */
+if (btnLang) {
+  btnLang.addEventListener("click", showTranslateHelpModal);
+}
+
+/* ✅ (Opcional pro) Mostrar aviso automático SOLO si NO está en español */
+(function autoHintIfNotSpanish() {
+  const lang = getBrowserLang();
+  if (!lang.startsWith("es")) {
+    const key = "tm_translate_hint_shown";
+    if (sessionStorage.getItem(key)) return;
+    sessionStorage.setItem(key, "1");
+
+    setTimeout(() => {
+      showTranslateHelpModal();
+    }, 1200);
+  }
+})();
 /* ================= WEATHER HELPERS ================= */
 function getMapCenterLatLng() {
   const c = map.getCenter?.();
