@@ -116,6 +116,29 @@ body {
   border-top: 1px solid rgba(255,255,255,0.1);
 }
 
+/* Layout footer: izquierda + derecha */
+.tm-footer{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* Derecha: iconos */
+.tm-footer-right{
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+/* Botón icono sin estilos (para dropdown/modal) */
+.tm-footer-btn{
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
 /* ICONOS */
 .footer-icon {
   font-size: 1.6rem;
@@ -128,6 +151,44 @@ body {
 .footer-icon:hover {
   color: var(--primary);
   transform: scale(1.2);
+}
+
+/* Dropdown del footer (contactame) - compatible con dark mode */
+.tm-footer-menu{
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: 0 10px 24px var(--shadow);
+  border-radius: 14px;
+  padding: 8px;
+  min-width: 200px;
+}
+
+.tm-footer-menu .dropdown-header{
+  color: var(--text);
+  opacity: 0.85;
+}
+
+.tm-footer-menu .dropdown-item{
+  border-radius: 10px;
+  color: var(--text);
+}
+
+.tm-footer-menu .dropdown-item:hover{
+  background: color-mix(in srgb, var(--card) 86%, #000 14%);
+}
+
+/* Responsive: en móvil apilar */
+@media (max-width: 576px){
+  .tm-footer{
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .tm-footer-right{
+    width: 100%;
+    justify-content: flex-start;
+    margin-top: 6px;
+  }
 }
 
 /* =========================

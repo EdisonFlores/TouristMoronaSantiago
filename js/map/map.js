@@ -1,4 +1,3 @@
-// js/map/map.js
 import { formatDurationFromSeconds } from "../app/helpers.js";
 
 export const map = L.map("map").setView([-2.309948, -78.124482], 13);
@@ -24,6 +23,13 @@ export const routeOverlay = L.layerGroup().addTo(map);
 // ✅ capa EXCLUSIVA para transporte
 export const transportOverlay = L.layerGroup().addTo(map);
 
+// ✅ capa dedicada para “Ir a provincia / Ir a cantón”
+export const interprovOverlay = L.layerGroup().addTo(map);
+
+export function clearInterprov() {
+  try { interprovOverlay.clearLayers(); } catch {}
+}
+
 let routeLine = null;
 let routeLines = [];
 let markerSelected = null;
@@ -31,10 +37,6 @@ let markerSelected = null;
 let transportLines = [];
 
 /* ================= POPUP HELPERS ================= */
-/**
- * ✅ Si hay popupHTML (eventos), lo usamos.
- * ✅ Si no, usamos formato estándar (lugares).
- */
 function buildPopupHTML(p) {
   if (!p) return `<b>Lugar</b>`;
   if (p.popupHTML && String(p.popupHTML).trim()) return String(p.popupHTML);
@@ -166,11 +168,31 @@ export async function drawRoute(userLoc, place, mode, infoBox) {
   }
 }
 
-/* ================= ruta hacia un punto (normal) ================= */
-export async function drawRouteToPoint({ from, to, mode = "walking", infoBox = null, title = "Ruta" }) {
+/* ================= ruta hacia un punto ================= */
+/**
+ * ✅ NUEVO: soporta layerGroup/layerTarget y clearFirst
+ * - Por defecto sigue igual (routeOverlay)
+ */
+export async function drawRouteToPoint({
+  from,
+  to,
+  mode = "walking",
+  infoBox = null,
+  title = "Ruta",
+  layerTarget = "normal",
+  layerGroup = null,
+  clearFirst = true
+}) {
   if (!from || !to) return null;
 
-  clearRoute();
+  // Limpieza correcta según destino
+  if (layerGroup) {
+    if (clearFirst) {
+      try { layerGroup.clearLayers(); } catch {}
+    }
+  } else {
+    if (clearFirst) clearRoute();
+  }
 
   const profile = {
     walking: "foot",
@@ -191,12 +213,24 @@ export async function drawRouteToPoint({ from, to, mode = "walking", infoBox = n
 
   const r = data.routes[0];
 
-  routeLine = L.polyline(
+  const line = L.polyline(
     r.geometry.coordinates.map(c => [c[1], c[0]]),
     { color: "#1e88e5", weight: 5 }
-  ).addTo(routeOverlay);
+  );
 
-  map.fitBounds(routeLine.getBounds());
+  const target =
+    layerGroup
+      ? layerGroup
+      : (layerTarget === "transport" ? transportOverlay : routeOverlay);
+
+  line.addTo(target);
+
+  // mantener compat: si es ruta normal, usamos routeLine/routeLines
+  if (!layerGroup && layerTarget !== "transport") {
+    routeLine = line;
+  }
+
+  map.fitBounds(line.getBounds());
 
   const distanciaKm = (Number(r.distance) || 0) / 1000;
 
@@ -295,12 +329,22 @@ export async function drawTwoLegOSRM({
   infoBox = null,
   title = "Ruta vía Terminal",
   layerTarget = "normal",
-  layerGroup = null
+  layerGroup = null,
+  clearFirst = true
 }) {
   if (!userLoc || !terminalLoc || !targetLoc) return null;
 
-  if (layerTarget === "transport") clearTransportRoute();
-  else clearRoute();
+  // Limpieza correcta según destino
+  if (layerGroup) {
+    if (clearFirst) {
+      try { layerGroup.clearLayers(); } catch {}
+    }
+  } else {
+    if (clearFirst) {
+      if (layerTarget === "transport") clearTransportRoute();
+      else clearRoute();
+    }
+  }
 
   const r1 = await fetchOSRMRoute(userLoc, terminalLoc, modeToProfile(mode));
   const r2 = await fetchOSRMRoute(terminalLoc, targetLoc, modeToProfile(mode));

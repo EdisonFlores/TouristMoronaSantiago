@@ -96,7 +96,7 @@
             <option value="mecanicas">🔧 Automotriz</option>
             <option value="parqueaderos">🅿️ Parqueaderos</option>
             <option value="ir_provincia">🧭 Ir a otra provincia (vía Terminal)</option>
-            <option value="ir_canton">🧭 Ir a otro ascantón  (vía Terminal)</option>
+            <option value="ir_canton">🧭 Ir a otro a cantón  (vía Terminal)</option>
           </optgroup>
 
           <optgroup label="🍽️ Alimentación">
@@ -174,11 +174,129 @@
 </main>
 
 <footer class="main-footer mt-4">
-  <div class="container">
-    <h6>TouristMacas</h6>
-    <p class="small mb-0">Plataforma turística y de servicios</p>
+  <div class="container tm-footer">
+
+    <div class="tm-footer-left">
+      <h6 class="mb-1">TouristMacas</h6>
+      <p class="small mb-0">Plataforma turística y de servicios</p>
+    </div>
+
+    <div class="tm-footer-right" aria-label="Acciones y enlaces del footer">
+
+      <!-- CONTACTAME: abre popup con redes -->
+      <div class="dropup">
+        <button
+          type="button"
+          class="tm-footer-btn footer-icon"
+          data-bs-toggle="dropdown"
+          aria-expanded="false"
+          aria-label="Contáctame"
+          title="Contáctame"
+        >
+          <i class="bi bi-person-lines-fill"></i>
+        </button>
+
+        <ul class="dropdown-menu dropdown-menu-end tm-footer-menu">
+          <li class="dropdown-header">Contáctame</li>
+
+          <li>
+            <a
+              class="dropdown-item d-flex align-items-center gap-2"
+              href="https://www.instagram.com/3d150n_f10r35?igsh=dXhlNGdzb3AzdGpm"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <i class="bi bi-instagram"></i>
+              Instagram
+            </a>
+          </li>
+
+          <li>
+            <a
+              class="dropdown-item d-flex align-items-center gap-2"
+              href="https://www.linkedin.com/in/edison-flores-8a7b61268?utm_source=share&utm_campaign=share_via&utm_content=profile&utm_medium=android_app"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <i class="bi bi-linkedin"></i>
+              LinkedIn
+            </a>
+          </li>
+        </ul>
+      </div>
+
+      <!-- INFO (modal) -->
+      <button
+        type="button"
+        class="tm-footer-btn footer-icon"
+        data-bs-toggle="modal"
+        data-bs-target="#tmInfoModal"
+        aria-label="Información del proyecto"
+        title="Información del proyecto"
+      >
+        <i class="bi bi-info-circle"></i>
+      </button>
+
+      <!-- ENCUESTA (nueva pestaña) -->
+      <a
+        class="footer-icon"
+        href="REEMPLAZA_AQUI_TU_LINK_DE_GOOGLE_FORMS"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="Encuesta"
+        title="Encuesta"
+      >
+        <i class="bi bi-clipboard2-check"></i>
+      </a>
+
+    </div>
   </div>
 </footer>
+
+<!-- Modal INFO -->
+<div class="modal fade" id="tmInfoModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+
+      <div class="modal-header">
+        <h5 class="modal-title">
+          <i class="bi bi-info-circle me-2"></i>
+          Información del proyecto
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+
+      <div class="modal-body">
+
+        <p class="mb-2">
+          Esta plataforma tiene como objetivo facilitar la consulta de
+          información turística y de servicios mediante un mapa interactivo.
+        </p>
+
+        <p class="mb-2">
+          Parte de la información consultada pertenece al siguiente documento
+          público:
+        </p>
+
+        <p class="mb-2">
+          <a
+            href="https://www.morona.gob.ec/wp-content/uploads/2024/12/ORDENANZA-SUSTITUTIVA-DE-RUTAS-Y-FRECUENCIAS-MORONA-18-12-24-signed-signed-signed-signed-signed.pdf"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Ver documento oficial
+          </a>
+        </p>
+
+        <p class="mb-0">
+          Esta es información pública. Próximamente se añadirá una guía de uso de la plataforma.
+        </p>
+
+      </div>
+
+    </div>
+  </div>
+</div>
 
 <!-- JS -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
